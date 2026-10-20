@@ -285,6 +285,25 @@ def mandala_emblem():
     b.append(f'<circle cx="300" cy="300" r="40" fill="{g}"/><circle cx="300" cy="300" r="16" fill="#fff6d8"/>')
     return svg("".join(b))
 
+def victor_emblem():
+    g = GOLD; ember = "#E2563A"
+    b = [f'<circle cx="300" cy="300" r="285" fill="none" stroke="{g}" stroke-width="2" opacity="0.6"/>', rays(40, 150, 270, g, 3, 0.5)]
+    for i in range(10):
+        a = math.radians(-90 + i * 36)
+        cx, cy = 300 + 215 * math.cos(a), 300 + 215 * math.sin(a)
+        b.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="22" fill="#3a1c1c" stroke="{g}" stroke-width="2" opacity="0.6"/>'
+                 f'<path d="M{cx-9:.1f},{cy:.1f} l6,7 l12,-14" fill="none" stroke="{g}" stroke-width="4" stroke-linecap="round"/>')
+    # laurel
+    for side in (-1, 1):
+        for k in range(7):
+            ang = math.radians(90 + side * (35 + k * 17))
+            x, y = 300 + 135 * math.cos(ang), 300 + 135 * math.sin(ang)
+            b.append(f'<ellipse cx="{x:.1f}" cy="{y:.1f}" rx="20" ry="9" fill="#4FB477" stroke="{g}" stroke-width="1.5" transform="rotate({math.degrees(ang)+90*side:.1f} {x:.1f} {y:.1f})"/>')
+    b.append(f'<circle cx="300" cy="300" r="100" fill="#1a0e0e" stroke="{g}" stroke-width="3"/>')
+    b.append(f'<path d="M300,215 C340,265 352,300 332,340 C325,356 312,365 300,367 C288,365 275,356 268,340 C248,300 260,265 300,215 Z" fill="{ember}"/>')
+    b.append(f'<path d="M300,262 C322,294 326,318 314,342 C309,352 304,356 300,357 C296,356 291,352 286,342 C274,318 278,294 300,262 Z" fill="#FFE6A8"/>')
+    return svg("".join(b))
+
 # ---------- card composer ----------
 def compose(slug, theme, emblem_svg, kicker, hi, name, sub, body_line, bullets, footer_note=None, sub_italic=True, highlight=None):
     bg = background(*theme)
@@ -352,6 +371,11 @@ def run(only=None):
             "The Inner Victory Mandala", "अंतर्विजय", "Inner Victory",
             "From the outside in", "Defeat the 10 vices, receive the 9 Nidhis, master the 8 Siddhis, return to the Self.",
             [], footer_note="Ask about any Devi, Nidhi, Siddhi or vice"))
+    if not only or "victor" in only:
+        made.append(compose("victor", ("#2a1a08", "#0c0804", "#8a5a1a"), victor_emblem(),
+            "10-day journey complete", "अंतर्विजयी", "Inner Victor",
+            "All ten heads of Ravan faced", "The real Vijayadashami is the victory inside.",
+            [], footer_note="Keep one practice going, every day"))
     return made
 
 if __name__ == "__main__":

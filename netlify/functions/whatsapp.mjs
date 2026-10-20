@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
+import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
 const HISTORY_TURNS = 16;                          // remembered messages per person (user + bot)
@@ -31,6 +32,8 @@ const MAIN_MENU = {
     { title: "The 9 Devis 🌸", description: "Navratri: root to crown, one quality a night" },
     { title: "The 9 Nidhis 💎", description: "Inner treasures that make life rich" },
     { title: "The 8 Siddhis ✨", description: "Inner powers, used for good" },
+    { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
+    { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
     { title: "Quiz me 🎯", description: "A quick 3-question quiz" },
     { title: "Today's challenge 💪", description: "One tiny practice for today" },
     { title: "Tell me a story 📖", description: "A short story with a lesson" },
@@ -69,68 +72,295 @@ export default async (req) => {
   if (!text) {
     await sendButtons(phoneNumberId, from, {
       body: "I can only read text for now 🙏 Tap a button or type your question about the Devis, Nidhis, Siddhis or Ravan's 10 heads.",
-      options: ["Ravan's 10 heads", "The 9 Devis", "Quiz me 🎯"],
+      options: [BTN.check, BTN.journey, BTN.quiz],
     });
     return ok();
   }
 
-  const historyKey = `chat/${from}`;
+  const ctx = { phoneNumberId, from, store, profileName };
+  const user = await loadUser(store, from);
+  const cmd = detectCommand(text);
 
-  if (/^(reset|restart|start over)$/i.test(text)) {
-    await store.delete(historyKey);
+  if (cmd === "reset") {
+    await store.delete(`chat/${from}`);
+    if (user.check && !user.check.result) { delete user.check; await saveUser(store, from, user); }
     await sendButtons(phoneNumberId, from, {
       body: "Fresh start 🌸 Where shall we begin?",
-      options: ["Ravan's 10 heads", "The 9 Devis", "Quiz me 🎯"],
+      options: [BTN.check, BTN.journey, BTN.quiz],
       image: cardUrl("mandala"),
     });
     return ok();
   }
 
-  if (/^(menu|options|topics)$/i.test(text)) {
+  if (cmd === "menu") {
     await sendList(phoneNumberId, from, { body: "Here's everything we can explore together. Tap *Explore* and pick one 👇", ...MAIN_MENU });
     return ok();
   }
 
-  let history = [];
-  let lastCard = null;
-  try {
-    const saved = await store.get(historyKey, { type: "json" });
-    if (saved && Date.now() - (saved.at || 0) < HISTORY_TTL_MS) { history = saved.turns || []; lastCard = saved.lastCard || null; }
-  } catch { history = []; }
-
-  // Give Claude the WhatsApp display name on a new conversation, so the greeting can feel personal.
-  const userTurn = history.length === 0 && profileName
-    ? `[WhatsApp name: ${profileName.slice(0, 40)}]\n${text}`
-    : text;
-  const messages = trimHistory([...history, { role: "user", content: userTurn }]);
-
-  let answer;
-  try {
-    answer = await askClaude(messages);
-  } catch (err) {
-    console.error("Claude error:", err);
-    await sendText(phoneNumberId, from, "Sorry, I couldn't answer just now 🙏 Please send your message again in a minute.");
-    return ok();
+  // An Inner Ravan check in progress takes the person's answers until it's done.
+  if (user.check && !user.check.result) {
+    if (/^(stop|exit|quit|cancel|band karo)$/i.test(text)) {
+      delete user.check; await saveUser(store, from, user);
+      await sendButtons(phoneNumberId, from, { body: "No problem, check stopped 🙂 What would you like instead?", options: [BTN.journey, BTN.quiz, BTN.story] });
+      return ok();
+    }
+    if (!cmd || cmd === "check") {
+      await continueCheck(ctx, user, cmd === "check" ? null : text);
+      return ok();
+    }
   }
 
-  const parsed = parseReply(answer);
-  const reply = toWhatsApp(parsed.text);
-  const image = parsed.card && parsed.card !== lastCard ? cardUrl(parsed.card) : null;
+  switch (cmd) {
+    case "check": await startCheck(ctx, user); return ok();
+    case "journey_start": await journeyStart(ctx, user, text); return ok();
+    case "journey_restart": delete user.journey; await journeyStart(ctx, user, text); return ok();
+    case "journey_next": await journeyNext(ctx, user, text, false); return ok();
+    case "journey_skip": await journeyNext(ctx, user, text, true); return ok();
+    case "journey_done":
+      if (user.journey && !user.journey.finished) { await journeyDone(ctx, user); return ok(); }
+      break; // "done" outside a journey: let the guide reply normally
+    case "progress": await showProgress(ctx, user); return ok();
+  }
 
-  await deliver(phoneNumberId, from, { reply, image, options: parsed.options, menu: parsed.menu });
-
-  // Remember what we offered, so a tap on a button makes sense to Claude next turn.
-  const offered = parsed.options.length ? `\n(Options offered: ${parsed.options.join(" / ")})`
-    : parsed.menu ? `\n(Menu offered: ${parsed.menu.rows.map((r) => r.title).join(" / ")})` : "";
-  await store.setJSON(historyKey, {
-    at: Date.now(),
-    lastCard: parsed.card || lastCard,
-    turns: trimHistory([...messages, { role: "assistant", content: reply + offered }]),
-  });
+  await converse(ctx, user, text);
   return ok();
 };
 
 export const config = { path: "/whatsapp" };
+
+// ---------- conversation with the guide ----------
+
+async function loadChat(store, from) {
+  try {
+    const saved = await store.get(`chat/${from}`, { type: "json" });
+    if (saved && Date.now() - (saved.at || 0) < HISTORY_TTL_MS) return { turns: saved.turns || [], lastCard: saved.lastCard || null };
+  } catch {}
+  return { turns: [], lastCard: null };
+}
+
+async function saveChat(store, from, chat) {
+  await store.setJSON(`chat/${from}`, { at: Date.now(), lastCard: chat.lastCard, turns: trimHistory(chat.turns) });
+}
+
+// Record a fixed (non-Claude) bot message in the history, so the guide knows what happened.
+async function remember(store, from, userText, botText) {
+  const chat = await loadChat(store, from);
+  chat.turns = trimHistory([...chat.turns, { role: "user", content: userText }, { role: "assistant", content: botText }]);
+  await saveChat(store, from, chat);
+}
+
+// Ask the guide, then send the reply with its card and buttons.
+// opts.note: private instruction for this turn; opts.options / opts.card force the choices or card;
+// opts.prefix: fixed text placed above the guide's words.
+async function converse({ phoneNumberId, from, store, profileName }, user, text, opts = {}) {
+  const chat = await loadChat(store, from);
+  let userTurn = text;
+  if (chat.turns.length === 0 && profileName) userTurn = `[WhatsApp name: ${profileName.slice(0, 40)}]\n${userTurn}`;
+  const forClaude = opts.note ? `${userTurn}\n\n[GUIDE NOTE, not written by the person: ${opts.note}]` : userTurn;
+  const messages = trimHistory([...chat.turns, { role: "user", content: forClaude }]);
+
+  let answer;
+  try {
+    answer = await askClaude(messages, personContext(user));
+  } catch (err) {
+    console.error("Claude error:", err);
+    await sendText(phoneNumberId, from, "Sorry, I couldn't answer just now 🙏 Please send your message again in a minute.");
+    return;
+  }
+
+  const parsed = parseReply(answer);
+  if (opts.options) { parsed.options = opts.options; parsed.menu = null; }
+  if (opts.card !== undefined) parsed.card = opts.card;
+  let reply = toWhatsApp(parsed.text);
+  if (opts.prefix) reply = `${opts.prefix}\n\n${reply}`;
+  const image = parsed.card && parsed.card !== chat.lastCard ? cardUrl(parsed.card) : null;
+
+  await deliver(phoneNumberId, from, { reply, image, options: parsed.options, menu: parsed.menu });
+
+  // Remember what we offered, so a tap on a button makes sense to the guide next turn.
+  const offered = parsed.options.length ? `\n(Options offered: ${parsed.options.join(" / ")})`
+    : parsed.menu ? `\n(Menu offered: ${parsed.menu.rows.map((r) => r.title).join(" / ")})` : "";
+  chat.turns = [...messages.slice(0, -1), { role: "user", content: userTurn }, { role: "assistant", content: reply + offered }];
+  chat.lastCard = parsed.card || chat.lastCard;
+  await saveChat(store, from, chat);
+}
+
+// ---------- per-person state (journey, self-check) ----------
+
+async function loadUser(store, from) {
+  try { return (await store.get(`user/${from}`, { type: "json" })) || {}; } catch { return {}; }
+}
+
+async function saveUser(store, from, user) {
+  await store.setJSON(`user/${from}`, user);
+}
+
+// ---------- Inner Ravan self-check ----------
+
+async function startCheck(ctx, user) {
+  user.check = { step: 0, answers: [], started: Date.now() };
+  await saveUser(ctx.store, ctx.from, user);
+  const intro = "🪞 *Inner Ravan check*\nTen quick questions, about a minute. Be honest, it's just for you 🙂\n\n";
+  await askCheckQuestion(ctx, user, intro, cardUrl("mandala"));
+}
+
+async function askCheckQuestion({ phoneNumberId, from }, user, intro = "", image = null) {
+  const i = user.check.step;
+  const body = `${intro}*${i + 1}/10*  ${progressBar(i)}\n\n${HEADS[i].q}`;
+  const sent = await sendButtons(phoneNumberId, from, { body, options: [BTN.often, BTN.sometimes, BTN.rarely], image });
+  if (!sent) await sendText(phoneNumberId, from, `${body}\n\nReply: Often, Sometimes or Rarely`);
+}
+
+async function continueCheck(ctx, user, text) {
+  if (text !== null) {
+    const score = scoreAnswer(text);
+    if (score === null) {
+      await sendButtons(ctx.phoneNumberId, ctx.from, {
+        body: `Just tap one of the buttons 🙂 (or type *stop* to leave the check)\n\n*${user.check.step + 1}/10*  ${HEADS[user.check.step].q}`,
+        options: [BTN.often, BTN.sometimes, BTN.rarely],
+      });
+      return;
+    }
+    user.check.answers[user.check.step] = score;
+    user.check.step += 1;
+  }
+  if (user.check.step < HEADS.length) {
+    await saveUser(ctx.store, ctx.from, user);
+    return askCheckQuestion(ctx, user);
+  }
+  return finishCheck(ctx, user);
+}
+
+async function finishCheck({ phoneNumberId, from, store }, user) {
+  const top = topHeads(user.check.answers);
+  user.check.result = top.map(({ slug, name, en, virtue }) => ({ slug, name, en, virtue }));
+  user.check.at = Date.now();
+  await saveUser(store, from, user);
+
+  let body, options, image;
+  if (!top.length) {
+    body = "🪞 *Your Inner Ravan*\n\nWow, all ten heads look calm right now 🙏✨ That's rare!\n\nEven so, every human carries all ten in small ways. The 10-day journey keeps them that way.";
+    options = [BTN.journey, BTN.quiz, BTN.story];
+    image = cardUrl("mandala");
+  } else {
+    const lines = top.map((h, i) => `${["1️⃣", "2️⃣", "3️⃣"][i]} *${h.name}* (${h.en})  →  ${h.virtue}`).join("\n");
+    body = `🪞 *Your Inner Ravan*\n\nThe heads asking for your attention most:\n\n${lines}\n\nEveryone carries all ten. Seeing them clearly is the first victory 🙏\n\nWant to start with *${top[0].name}*?`;
+    options = [`Help with ${top[0].name}`.slice(0, 20), BTN.journey, BTN.quiz];
+    image = cardUrl(top[0].slug);
+  }
+  if (!(await sendButtons(phoneNumberId, from, { body, options, image }))) await sendText(phoneNumberId, from, body);
+  await remember(store, from, "(Took the Inner Ravan check)", body + `\n(Options offered: ${options.join(" / ")})`);
+}
+
+// ---------- 10-day Defeat Ravan journey ----------
+
+async function journeyStart(ctx, user, text) {
+  const j = user.journey;
+  if (j && !j.finished) return showProgress(ctx, user, "You're already on the journey 🔥 Let's keep going!");
+  user.journey = { day: 0, done: [], streak: 0, best: 0, started: istDate() };
+  if (j?.finished) user.journey.round = (j.round || 1) + 1;
+  return sendJourneyDay(ctx, user, text, 1);
+}
+
+async function journeyNext(ctx, user, text, force) {
+  const j = user.journey;
+  if (!j) return journeyStart(ctx, user, text);
+  if (j.finished) return sendComplete(ctx, user);
+  const today = istDate();
+  if (!force && j.lessonDate === today) {
+    const doneToday = j.done.includes(j.day);
+    const body = doneToday
+      ? `Day ${j.day} is done ✅ *Day ${j.day + 1}: ${HEADS[j.day]?.name}* unlocks tomorrow 🌅\n\nOne head a day lets each lesson really sink in.`
+      : `Today's challenge (Day ${j.day}: *${HEADS[j.day - 1].name}*) is still waiting 🙂\n\nTap *Done ✅* once you've tried it, and Day ${j.day + 1} opens tomorrow.`;
+    const options = doneToday ? [BTN.quiz, BTN.story, BTN.progress] : [BTN.done, BTN.more, BTN.progress];
+    await sendButtons(ctx.phoneNumberId, ctx.from, { body, options });
+    return;
+  }
+  // A new day: move on if yesterday's day was done, otherwise give that day another go.
+  const nextDay = j.done.includes(j.day) || j.day === 0 ? j.day + 1 : j.day;
+  if (nextDay > 10) return sendComplete(ctx, user);
+  return sendJourneyDay(ctx, user, text, nextDay);
+}
+
+async function sendJourneyDay(ctx, user, text, day) {
+  const j = user.journey;
+  const h = HEADS[day - 1];
+  j.day = day;
+  j.lessonDate = istDate();
+  await saveUser(ctx.store, ctx.from, user);
+  const prefix = `🔥 *Defeat Ravan · Day ${day}/10*\n${progressBar(j.done.length)}`;
+  const note = `They are on the 10-day "Defeat Ravan" journey. Write Day ${day} of 10: Ravan's head *${h.name}* (${h.en}), conquered by ${h.virtue}. ` +
+    `Do not repeat the "Day ${day}/10" heading or a progress bar; they are added above your text. Shape: a catchy one-line hook; ` +
+    `how ${h.name} shows up in everyday life (2-3 short lines, relatable: work, family, phone, money); ` +
+    `one tiny, specific challenge for today that takes under 5 minutes; then ask them to tap "Done ✅" after trying it. ` +
+    `Keep it under 110 words.` + (day === 1 ? " As this is the start, add one warm line welcoming them to the journey." : "");
+  await converse(ctx, user, text, { note, prefix, options: [BTN.done, BTN.more, BTN.quiz], card: h.slug });
+}
+
+async function journeyDone({ phoneNumberId, from, store }, user) {
+  const j = user.journey;
+  const today = istDate();
+  if (j.done.includes(j.day)) {
+    const body = `Already marked ✅ for Day ${j.day}. *Day ${j.day + 1}${HEADS[j.day] ? `: ${HEADS[j.day].name}` : ""}* unlocks tomorrow 🌅`;
+    await sendButtons(phoneNumberId, from, { body, options: [BTN.quiz, BTN.story, BTN.progress] });
+    return;
+  }
+  j.done.push(j.day);
+  j.streak = j.lastDoneDate && daysBetween(j.lastDoneDate, today) === 1 ? j.streak + 1 : (j.lastDoneDate === today ? j.streak : 1);
+  j.best = Math.max(j.best || 0, j.streak);
+  j.lastDoneDate = today;
+  const h = HEADS[j.day - 1];
+
+  if (j.done.length >= 10 || j.day === 10) {
+    j.finished = today;
+    await saveUser(store, from, user);
+    return sendComplete({ phoneNumberId, from, store }, user, true);
+  }
+  await saveUser(store, from, user);
+  const next = HEADS[j.day];
+  const cheers = ["Wonderful", "Beautiful", "Shabaash", "Well done", "That's the spirit"];
+  const body = `${cheers[j.done.length % cheers.length]}! ✅ *${h.name}* faced, Day ${j.day} complete.\n\n` +
+    `${progressBar(j.done.length)}  ${j.done.length}/10\n🔥 Streak: ${j.streak} day${j.streak === 1 ? "" : "s"}\n\n` +
+    `Come back tomorrow for *Day ${j.day + 1}: ${next.name}* (${next.en}) 🌅`;
+  await sendButtons(phoneNumberId, from, { body, options: [BTN.quiz, BTN.story, BTN.progress] });
+  await remember(store, from, BTN.done, body);
+}
+
+async function sendComplete({ phoneNumberId, from, store }, user, justFinished = false) {
+  const j = user.journey;
+  const body = (justFinished ? "🏆 *You did it!* All ten heads of Ravan faced, one by one.\n\n" : "🏆 You've completed the 10-day journey!\n\n") +
+    `${progressBar(10)}  10/10\n🔥 Best streak: ${j.best || j.streak} day${(j.best || j.streak) === 1 ? "" : "s"}\n\n` +
+    "This is the real Vijayadashami: victory inside, not outside. Keep one practice going, and come back whenever a head rises again 🙏";
+  const options = [BTN.check, "The 9 Nidhis 💎", BTN.story];
+  const ok1 = await sendButtons(phoneNumberId, from, { body, options, image: cardUrl("victor") });
+  if (!ok1) await sendText(phoneNumberId, from, body);
+  await remember(store, from, justFinished ? BTN.done : "(Asked about the journey)", body);
+}
+
+async function showProgress({ phoneNumberId, from, store }, user, lead = "") {
+  const j = user.journey;
+  const parts = [];
+  if (lead) parts.push(lead);
+  if (j && !j.finished) {
+    const today = istDate();
+    const todayDone = j.done.includes(j.day);
+    parts.push(`📊 *Your Defeat Ravan journey*\n${progressBar(j.done.length)}  ${j.done.length}/10\n🔥 Streak: ${j.streak} · Best: ${j.best || j.streak}`);
+    parts.push(j.lessonDate === today
+      ? (todayDone ? `Day ${j.day} done ✅ Day ${j.day + 1} unlocks tomorrow.` : `Today: Day ${j.day}, *${HEADS[j.day - 1].name}*. Tap Done ✅ after the challenge.`)
+      : `Your next step is ready: tap *${BTN.next}* 🌅`);
+  } else if (j?.finished) {
+    parts.push(`🏆 Journey complete! Best streak: ${j.best || j.streak} days.`);
+  } else {
+    parts.push("You haven't started the 10-day *Defeat Ravan* journey yet. One head a day, ten days, real change 🔥");
+  }
+  if (user.check?.result?.length) parts.push(`🪞 Your top heads: ${user.check.result.map((h) => h.name).join(", ")}`);
+  const body = parts.join("\n\n");
+  let options;
+  if (j && !j.finished) options = j.lessonDate === istDate() && !j.done.includes(j.day) ? [BTN.done, BTN.more, BTN.quiz] : [BTN.next, BTN.quiz, BTN.story];
+  else options = [BTN.journey, user.check?.result ? BTN.quiz : BTN.check, BTN.story];
+  await sendButtons(phoneNumberId, from, { body, options });
+  await remember(store, from, BTN.progress, body);
+}
 
 // ---------- message handling ----------
 
@@ -256,7 +486,7 @@ function trimHistory(turns) {
   return t;
 }
 
-async function askClaude(messages) {
+async function askClaude(messages, person = "") {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -267,7 +497,10 @@ async function askClaude(messages) {
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL || "claude-haiku-5-5",
       max_tokens: 600,
-      system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+      system: [
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+        ...(person ? [{ type: "text", text: `ABOUT THIS PERSON (private, from the app):\n${person}` }] : []),
+      ],
       messages,
     }),
   });
