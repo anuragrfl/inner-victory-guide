@@ -16,6 +16,8 @@
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
+import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
+import { QUIZ_BANK } from "../../lib/quizbank.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
@@ -34,7 +36,7 @@ const MAIN_MENU = {
     { title: "The 8 Siddhis ✨", description: "Inner powers, used for good" },
     { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
     { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
-    { title: "Quiz me 🎯", description: "A quick 3-question quiz" },
+    { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
     { title: "Today's challenge 💪", description: "One tiny practice for today" },
     { title: "Tell me a story 📖", description: "A short story with a lesson" },
   ],
@@ -110,7 +112,19 @@ export default async (req) => {
     }
   }
 
+  // A quiz in progress takes the person's taps until it's done.
+  if (user.quiz && !cmd) {
+    if (/^(stop|exit|quit|cancel|band karo)$/i.test(text)) {
+      delete user.quiz; await saveUser(store, from, user);
+      await sendButtons(phoneNumberId, from, { body: "Quiz stopped 🙂 What next?", options: [BTN.journey, BTN.story, BTN.check] });
+      return ok();
+    }
+    await answerQuiz(ctx, user, text);
+    return ok();
+  }
+
   switch (cmd) {
+    case "quiz": await startQuiz(ctx, user, text); return ok();
     case "check": await startCheck(ctx, user); return ok();
     case "journey_start": await journeyStart(ctx, user, text); return ok();
     case "journey_restart": delete user.journey; await journeyStart(ctx, user, text); return ok();
@@ -193,6 +207,64 @@ async function loadUser(store, from) {
 
 async function saveUser(store, from, user) {
   await store.setJSON(`user/${from}`, user);
+}
+
+// ---------- scored quizzes ----------
+
+async function startQuiz(ctx, user, text) {
+  const topic = topicFromText(text);
+  const picked = pickQuestions(topic, user.quizSeen || []);
+  if (!picked.length) return converse(ctx, user, text);
+  user.quiz = { topic, i: 0, score: 0, qs: picked.map((q) => ({ id: q.id, ...presentQuestion(q) })) };
+  await saveUser(ctx.store, ctx.from, user);
+  const intro = `🎯 *Quiz time: ${QUIZ_TOPICS[topic]}*\n${QUIZ_LEN} quick questions. Tap your answer!\n\n`;
+  await askQuizQuestion(ctx, user, intro);
+}
+
+function bankItem(id) { return QUIZ_BANK.find((q) => q.id === id); }
+
+async function askQuizQuestion({ phoneNumberId, from }, user, lead = "") {
+  const cur = user.quiz.qs[user.quiz.i];
+  const q = bankItem(cur.id);
+  const body = `${lead}*Q${user.quiz.i + 1}/${QUIZ_LEN}*  ${q.q}`;
+  const sent = await sendButtons(phoneNumberId, from, { body, options: cur.options });
+  if (!sent) await sendText(phoneNumberId, from, `${body}\n\n${cur.options.map((o, k) => `${k + 1}. ${o}`).join("\n")}`);
+}
+
+async function answerQuiz(ctx, user, text) {
+  const { phoneNumberId, from, store } = ctx;
+  const cur = user.quiz.qs[user.quiz.i];
+  const q = bankItem(cur.id);
+  const pick = matchOption(text, cur.options);
+  if (pick < 0) {
+    await sendButtons(phoneNumberId, from, { body: `Tap one of the answers 🙂 (or type *stop*)\n\n*Q${user.quiz.i + 1}/${QUIZ_LEN}*  ${q.q}`, options: cur.options });
+    return;
+  }
+  const right = pick === cur.answer;
+  if (right) user.quiz.score += 1;
+  const praise = ["Correct! 👏", "Spot on! ✨", "Yes! 🔥", "Shabaash! 👏"][user.quiz.i % 4];
+  const feedback = right ? `✅ ${praise}\n${q.why}` : `❌ Not quite. It's *${cur.options[cur.answer]}*.\n${q.why}`;
+  user.quizSeen = [...(user.quizSeen || []), cur.id].slice(-80);
+  user.quiz.i += 1;
+
+  if (user.quiz.i < QUIZ_LEN) {
+    await saveUser(store, from, user);
+    return askQuizQuestion(ctx, user, `${feedback}\n\n`);
+  }
+
+  const score = user.quiz.score;
+  const stats = user.quizStats || { played: 0, best: 0, total: 0 };
+  stats.played += 1; stats.total += score; stats.best = Math.max(stats.best, score);
+  user.quizStats = stats;
+  const topic = user.quiz.topic;
+  delete user.quiz;
+  await saveUser(store, from, user);
+  const body = `${feedback}\n\n━━━━━━━━━━\n*Score: ${score}/${QUIZ_LEN}*  ${"⭐".repeat(score)}${"☆".repeat(QUIZ_LEN - score)}\n${quizVerdict(score)}\n` +
+    `_Quizzes played: ${stats.played}_`;
+  const third = user.journey && !user.journey.finished ? BTN.next : user.check?.result ? BTN.journey : BTN.check;
+  const options = [BTN.quizAgain, BTN.story, third];
+  if (!(await sendButtons(phoneNumberId, from, { body, options }))) await sendText(phoneNumberId, from, body);
+  await remember(store, from, `(Took a quiz on ${QUIZ_TOPICS[topic]})`, `Quiz finished: ${score}/${QUIZ_LEN}.\n(Options offered: ${options.join(" / ")})`);
 }
 
 // ---------- Inner Ravan self-check ----------
