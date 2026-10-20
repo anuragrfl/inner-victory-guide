@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
+import { MEDITATIONS, findMeditation } from "../../lib/meditate.mjs";
 import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
@@ -33,16 +34,16 @@ const MAX_BODY = 1024;                              // interactive message body 
 const MAIN_MENU = {
   button: "Explore 🪔",
   rows: [
-    { title: "How I feel 💛", description: "Check in: share a feeling, get a teaching and a practice" },
-    { title: "Deep question 💭", description: "A question about life, to reflect on together" },
+    { title: "How I feel 💛", description: "Check in: share a feeling, get comfort and a practice" },
+    { title: "Meditate with me 🧘", description: "1-2 minute guided pauses: breath, calm, sleep" },
+    { title: "Deep question 💭", description: "A question about life and self-love, to reflect on" },
     { title: "Kill a head ⚔️", description: "Pick one of Ravan's heads: 7-day challenge" },
     { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
     { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
     { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
-    { title: "Tell me a story 📖", description: "A short story with a lesson" },
     { title: "Sacred places 🛕", description: "Shakti Peethas, Jyotirlingas, famous temples" },
-    { title: "The 9 Devis 🌸", description: "Navratri: root to crown, one quality a night" },
-    { title: "Nidhis & Siddhis 💎", description: "Inner treasures and inner powers" },
+    { title: "Tell me a story 📖", description: "A short story with a lesson" },
+    { title: "9 Devis & treasures 🌸", description: "The 9 Devis, 9 Nidhis and 8 Siddhis" },
   ],
 };
 
@@ -106,7 +107,7 @@ export default async (req) => {
     if (user.check && !user.check.result) { delete user.check; await saveUser(store, from, user); }
     await sendButtons(phoneNumberId, from, {
       body: "Jai Mata Di 🙏 Fresh start 🌸 Where shall we begin?",
-      options: [BTN.check, BTN.journey, BTN.quiz],
+      options: [BTN.feel, BTN.meditate, BTN.killMenu],
       image: cardUrl("mandala"),
     });
     return ok();
@@ -161,6 +162,8 @@ export default async (req) => {
       break; // "done" with nothing active: let the guide reply normally
     }
     case "progress": await showProgress(ctx, user); return ok();
+    case "meditate": await meditateMenu(ctx, user); return ok();
+    case "selflove": await converse(ctx, user, text, { note: "They want a self-love moment. Warmly remind them of their worth (specific, not generic), share one line of wisdom (e.g. Gita 6.5: be your own friend), give one tiny self-love practice to do today, and end with a gentle personal question about how they treat themselves. Under 110 words. No options or menu.", card: "kushmanda", options: [] }); return ok();
     case "sacred": await sacredMenu(ctx, user); return ok();
     case "checkin": await feelingsMenu(ctx, user); return ok();
     case "feeling": {
@@ -183,6 +186,12 @@ export default async (req) => {
     case "mind": await mindTricks(ctx, user); return ok();
     case "remind_on": await setReminder(ctx, user, true); return ok();
     case "remind_off": await setReminder(ctx, user, false); return ok();
+  }
+
+  // A meditation chosen from the list.
+  if (!cmd) {
+    const med = findMeditation(text);
+    if (med) { await guideMeditation(ctx, user, med); return ok(); }
   }
 
   // Taps in the Sacred places menus.
@@ -331,6 +340,26 @@ async function answerQuiz(ctx, user, text) {
   const options = [BTN.quizAgain, BTN.story, third];
   if (!(await sendButtons(phoneNumberId, from, { body, options }))) await sendText(phoneNumberId, from, body);
   await remember(store, from, `(Took a quiz on ${QUIZ_TOPICS[topic]})`, `Quiz finished: ${score}/${QUIZ_LEN}.\n(Options offered: ${options.join(" / ")})`);
+}
+
+// ---------- meditate with me ----------
+
+async function meditateMenu({ phoneNumberId, from, store }, user) {
+  const body = "🧘 *Meditate with me*\nLet's take a small pause together. Even one minute brings you home to yourself. Choose one 👇";
+  const rows = MEDITATIONS.map((m) => ({ title: m.title, description: m.description }));
+  if (!(await sendList(phoneNumberId, from, { body, button: "Choose", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + MEDITATIONS.map((m) => m.title).join("\n"));
+  }
+  await remember(store, from, BTN.meditate, body);
+}
+
+async function guideMeditation({ phoneNumberId, from, store }, user, med) {
+  user.meditations = (user.meditations || 0) + 1;
+  user.lastMeditation = { key: med.key, at: Date.now() };
+  await saveUser(store, from, user);
+  const prompt = `${med.text}\n\nTake your time. When you open your eyes, tell me: *how do you feel now?*`;
+  await deliver(phoneNumberId, from, { reply: prompt, image: cardUrl(med.card), options: [BTN.calmer, BTN.restless, BTN.anotherMed], menu: null });
+  await remember(store, from, med.title, prompt + "\n(Guided meditation sent. If they reply 'I feel calmer', celebrate it warmly and ask what they noticed; if 'Still restless', reassure them that's completely normal, the mind is like a puppy that learns to sit, and offer one gentler tip.)");
 }
 
 // ---------- sacred places ----------
