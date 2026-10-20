@@ -18,7 +18,7 @@ import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
-import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
+import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
 const HISTORY_TURNS = 16;                          // remembered messages per person (user + bot)
@@ -81,6 +81,9 @@ export default async (req) => {
 
   const ctx = { phoneNumberId, from, store, profileName };
   const user = await loadUser(store, from);
+  user.lastInAt = Date.now();
+  user.pn = phoneNumberId;
+  await saveUser(store, from, user);
   const cmd = detectCommand(text);
 
   if (cmd === "reset") {
@@ -134,6 +137,8 @@ export default async (req) => {
       if (user.journey && !user.journey.finished) { await journeyDone(ctx, user); return ok(); }
       break; // "done" outside a journey: let the guide reply normally
     case "progress": await showProgress(ctx, user); return ok();
+    case "remind_on": await setReminder(ctx, user, true); return ok();
+    case "remind_off": await setReminder(ctx, user, false); return ok();
   }
 
   await converse(ctx, user, text);
@@ -378,7 +383,21 @@ async function journeyDone({ phoneNumberId, from, store }, user) {
     return;
   }
   j.done.push(j.day);
-  j.streak = j.lastDoneDate && daysBetween(j.lastDoneDate, today) === 1 ? j.streak + 1 : (j.lastDoneDate === today ? j.streak : 1);
+
+  // Streaks: +1 for consecutive days; one missed day per week is forgiven by the streak shield;
+  // otherwise a gentle fresh start (never "you lost your streak").
+  let streakNote = "";
+  const gap = j.lastDoneDate ? daysBetween(j.lastDoneDate, today) : null;
+  if (gap === null) j.streak = 1;
+  else if (gap === 0) { /* same day, keep */ }
+  else if (gap === 1) j.streak += 1;
+  else if (gap === 2 && j.shieldWeek !== weekId(today)) {
+    j.streak += 1; j.shieldWeek = weekId(today);
+    streakNote = "\n🛡️ Your weekly *streak shield* covered yesterday. Streak saved!";
+  } else {
+    j.streak = 1;
+    streakNote = "\n🌱 A *fresh start* today. Every day you show up counts.";
+  }
   j.best = Math.max(j.best || 0, j.streak);
   j.lastDoneDate = today;
   const h = HEADS[j.day - 1];
@@ -391,11 +410,24 @@ async function journeyDone({ phoneNumberId, from, store }, user) {
   await saveUser(store, from, user);
   const next = HEADS[j.day];
   const cheers = ["Wonderful", "Beautiful", "Shabaash", "Well done", "That's the spirit"];
+  const milestone = j.streak === 3 ? "\n🎉 *3-day streak!* The habit is taking root." : j.streak === 7 ? "\n🌟 *7-day streak!* People who reach 7 days usually go all the way." : "";
   const body = `${cheers[j.done.length % cheers.length]}! ✅ *${h.name}* faced, Day ${j.day} complete.\n\n` +
-    `${progressBar(j.done.length)}  ${j.done.length}/10\n🔥 Streak: ${j.streak} day${j.streak === 1 ? "" : "s"}\n\n` +
-    `Come back tomorrow for *Day ${j.day + 1}: ${next.name}* (${next.en}) 🌅`;
-  await sendButtons(phoneNumberId, from, { body, options: [BTN.quiz, BTN.story, BTN.progress] });
-  await remember(store, from, BTN.done, body);
+    `${progressBar(j.done.length)}  ${j.done.length}/10\n🔥 Streak: ${j.streak} day${j.streak === 1 ? "" : "s"}${streakNote}${milestone}\n\n` +
+    `👀 *Tomorrow, Day ${j.day + 1}:* ${next.tease}`;
+  const options = user.remind ? [BTN.quiz, BTN.story, BTN.progress] : [BTN.remind, BTN.quiz, BTN.story];
+  await sendButtons(phoneNumberId, from, { body, options });
+  await remember(store, from, BTN.done, body + `\n(Options offered: ${options.join(" / ")})`);
+}
+
+async function setReminder({ phoneNumberId, from, store }, user, on) {
+  user.remind = on;
+  await saveUser(store, from, user);
+  const body = on
+    ? "🔔 Done! I'll send you a gentle nudge when your next day is ready, at most once a day. Reply *stop reminders* anytime to turn them off."
+    : "🔕 Reminders off. You can always come back and tap *Next day ➡️* yourself 🙏";
+  const options = user.journey && !user.journey.finished ? [BTN.quiz, BTN.story, BTN.progress] : [BTN.journey, BTN.quiz, BTN.story];
+  await sendButtons(phoneNumberId, from, { body, options });
+  await remember(store, from, on ? BTN.remind : "stop reminders", body);
 }
 
 async function sendComplete({ phoneNumberId, from, store }, user, justFinished = false) {
