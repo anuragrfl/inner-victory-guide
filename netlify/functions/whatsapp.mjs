@@ -136,7 +136,11 @@ export default async (req) => {
       await sendButtons(phoneNumberId, from, { body: "Quiz stopped 🙂 What next?", options: [BTN.journey, BTN.story, BTN.check] });
       return ok();
     }
-    await answerQuiz(ctx, user, text);
+    const cur = user.quiz.qs[user.quiz.i];
+    if (matchOption(text, cur.options) >= 0) { await answerQuiz(ctx, user, text); return ok(); }
+    // Anything else is a new message: close the quiz quietly and answer it.
+    delete user.quiz; await saveUser(store, from, user);
+    await converse(ctx, user, text, { note: "They left a quiz midway to say or ask this. Answer it fully and warmly; at the end you may offer \"Quiz again 🎯\" as one option." });
     return ok();
   }
 
@@ -180,6 +184,8 @@ export default async (req) => {
   }
 
   // An answer to a deep question gets a listening, reflective reply.
+  const looksLikeNewQuestion = /\?\s*$/.test(text) && !/\b(i|me|my|main|mera|meri|mujhe)\b/i.test(text);
+  if (!cmd && user.pendingQ && looksLikeNewQuestion) delete user.pendingQ;
   if (!cmd && user.pendingQ && Date.now() - user.pendingQ.at < 24 * 3600 * 1000) {
     await answerDeepQuestion(ctx, user, text);
     return ok();
@@ -505,6 +511,12 @@ async function mindTricks({ phoneNumberId, from, store }, user) {
 // ---------- Inner Ravan self-check ----------
 
 async function startCheck(ctx, user) {
+  if (user.checkPaused && Date.now() - user.checkPaused.started < 24 * 3600 * 1000) {
+    user.check = user.checkPaused; delete user.checkPaused;
+    await saveUser(ctx.store, ctx.from, user);
+    return askCheckQuestion(ctx, user, "🪞 Welcome back! Let's continue where you left off.\n\n");
+  }
+  delete user.checkPaused;
   user.check = { step: 0, answers: [], started: Date.now() };
   await saveUser(ctx.store, ctx.from, user);
   const intro = "🪞 *Inner Ravan check*\nTen quick questions, about a minute. Be honest, it's just for you 🙂\n\n";
@@ -522,10 +534,10 @@ async function continueCheck(ctx, user, text) {
   if (text !== null) {
     const score = scoreAnswer(text);
     if (score === null) {
-      await sendButtons(ctx.phoneNumberId, ctx.from, {
-        body: `Just tap one of the buttons 🙂 (or type *stop* to leave the check)\n\n*${user.check.step + 1}/10*  ${HEADS[user.check.step].q}`,
-        options: [BTN.often, BTN.sometimes, BTN.rarely],
-      });
+      // Not an answer: pause the check (progress kept) and reply to what they actually said.
+      user.checkPaused = user.check; delete user.check;
+      await saveUser(ctx.store, ctx.from, user);
+      await converse(ctx, user, text, { note: "They paused the Inner Ravan check midway to say or ask this. Answer it fully and warmly; at the end you may offer \"Inner Ravan check 🪞\" as one option to continue it." });
       return;
     }
     user.check.answers[user.check.step] = score;
