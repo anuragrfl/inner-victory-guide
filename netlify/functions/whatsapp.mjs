@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
+import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
@@ -36,6 +37,7 @@ const MAIN_MENU = {
     { title: "The 8 Siddhis ✨", description: "Inner powers, used for good" },
     { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
     { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
+    { title: "Kill a head ⚔️", description: "Pick one of Ravan's heads: 7-day challenge" },
     { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
     { title: "Today's challenge 💪", description: "One tiny practice for today" },
     { title: "Tell me a story 📖", description: "A short story with a lesson" },
@@ -133,10 +135,26 @@ export default async (req) => {
     case "journey_restart": delete user.journey; await journeyStart(ctx, user, text); return ok();
     case "journey_next": await journeyNext(ctx, user, text, false); return ok();
     case "journey_skip": await journeyNext(ctx, user, text, true); return ok();
-    case "journey_done":
-      if (user.journey && !user.journey.finished) { await journeyDone(ctx, user); return ok(); }
-      break; // "done" outside a journey: let the guide reply normally
+    case "journey_done": {
+      const j = user.journey;
+      const journeyPending = j && !j.finished && !j.done.includes(j.day);
+      if (journeyPending) { await journeyDone(ctx, user); return ok(); }
+      if (user.activeHead) { await killDone(ctx, user); return ok(); }
+      if (j && !j.finished) { await journeyDone(ctx, user); return ok(); }
+      break; // "done" with nothing active: let the guide reply normally
+    }
     case "progress": await showProgress(ctx, user); return ok();
+    case "kill_menu": await killMenu(ctx, user); return ok();
+    case "kill_head": {
+      const h = findHead(text);
+      if (h) { await headIntro(ctx, user, h); return ok(); }
+      break;
+    }
+    case "kill_start": await killStart(ctx, user, text); return ok();
+    case "kill_next": await killNext(ctx, user, false); return ok();
+    case "kill_skip": await killNext(ctx, user, true); return ok();
+    case "kill_done": await killDone(ctx, user); return ok();
+    case "mind": await mindTricks(ctx, user); return ok();
     case "remind_on": await setReminder(ctx, user, true); return ok();
     case "remind_off": await setReminder(ctx, user, false); return ok();
   }
@@ -272,6 +290,127 @@ async function answerQuiz(ctx, user, text) {
   await remember(store, from, `(Took a quiz on ${QUIZ_TOPICS[topic]})`, `Quiz finished: ${score}/${QUIZ_LEN}.\n(Options offered: ${options.join(" / ")})`);
 }
 
+// ---------- Kill Ravan's 10 heads: 7-day challenges ----------
+
+function headState(user, slug) {
+  user.heads = user.heads || {};
+  return (user.heads[slug] = user.heads[slug] || { done: 0 });
+}
+
+async function killMenu({ phoneNumberId, from, store }, user) {
+  const slain = user.slain || [];
+  const rows = HEAD_CHALLENGES.map((h) => {
+    const st = user.heads?.[h.slug];
+    const status = slain.includes(h.slug) ? "🗡️ Slain!" : st?.done ? `In progress · ${st.done}/7 days` : `Kill it with ${h.virtue}`;
+    return { title: `⚔️ ${h.name}`, description: `${h.en} · ${status}`.slice(0, 72) };
+  });
+  const top = user.check?.result?.[0];
+  const body = `👹 *Kill Ravan's 10 heads*\n${slainBar(slain)}  ${slain.length}/10 slain\n\n` +
+    "Pick *one head* to fight. You'll learn its tricks, then defeat it with a 7-day challenge, one small task a day." +
+    (top && !slain.includes(top.slug) ? `\n\n💡 Your check said *${top.name}* needs attention most.` : "");
+  if (!(await sendList(phoneNumberId, from, { body, button: "Choose a head", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + HEAD_CHALLENGES.map((h, i) => `${i + 1}. ${h.name} (${h.en})`).join("\n") + "\n\n_Reply with a head's name._");
+  }
+  await remember(store, from, BTN.killMenu, body);
+}
+
+async function headIntro({ phoneNumberId, from, store }, user, h) {
+  user.headView = h.slug;
+  await saveUser(store, from, user);
+  const slain = (user.slain || []).includes(h.slug);
+  const reply = `⚔️ *${h.name}* (${h.hi}) · ${h.en}\n${h.what}\n\n` +
+    `👀 *Signs it's ruling you*\n${h.signs.map((x) => `• ${x}`).join("\n")}\n\n` +
+    `🧠 *What your mind will say*\n_${h.trick}_\n\n` +
+    `🗡️ *How to kill it*\n${h.tips.map((x, i) => `${i + 1}. ${x}`).join("\n")}\n\n` +
+    (slain ? "You've already slain this head once 🗡️ Want to train again?" : `Ready for 7 days of *${h.virtue}*?`);
+  const options = [slain ? "Train again ⚔️" : BTN.startKill, BTN.mind, BTN.otherHeads];
+  await deliver(phoneNumberId, from, { reply, image: cardUrl(h.slug), options, menu: null });
+  await remember(store, from, `⚔️ ${h.name}`, reply + `\n(Options offered: ${options.join(" / ")})`);
+}
+
+async function killStart(ctx, user, text) {
+  const h = findHead(text) || HEAD_CHALLENGES.find((x) => x.slug === user.headView) || HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
+  if (!h) return killMenu(ctx, user);
+  const st = headState(user, h.slug);
+  if (st.done >= CHALLENGE_LEN) { st.done = 0; delete st.lastDoneDate; } // training again
+  user.activeHead = h.slug;
+  await saveUser(ctx.store, ctx.from, user);
+  return sendKillTask(ctx, user, h, st.done ? "Welcome back to the fight 💪" : `The fight against *${h.name}* begins today 🔥`);
+}
+
+async function killNext(ctx, user, force) {
+  const h = HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
+  if (!h) return killMenu(ctx, user);
+  const st = headState(user, h.slug);
+  if (!force && st.lastDoneDate === istDate()) {
+    const body = `✅ Today's task is done. *Day ${st.done + 1}/7* against *${h.name}* unlocks tomorrow 🌅\n\nOne task a day lets the change go deep.`;
+    const options = [BTN.mind, BTN.quiz, BTN.progress];
+    await sendButtons(ctx.phoneNumberId, ctx.from, { body, options });
+    return;
+  }
+  return sendKillTask(ctx, user, h);
+}
+
+async function sendKillTask({ phoneNumberId, from, store }, user, h, lead = "") {
+  const st = headState(user, h.slug);
+  const d = h.days[Math.min(st.done, CHALLENGE_LEN - 1)];
+  st.taskDate = istDate();
+  await saveUser(store, from, user);
+  const body = `${lead ? lead + "\n\n" : ""}⚔️ *Killing ${h.name} · Day ${st.done + 1}/7*\n${progressBar7(st.done)}\n\n` +
+    `🎯 *Today's task*\n${d.task}\n\n🧠 *Your mind will say:* _${d.mind}_\n💪 *Answer it:* ${d.answer}\n\nTap *Done ⚔️* when you've done it.`;
+  const options = [BTN.killDone, BTN.mind, BTN.otherHeads];
+  const image = st.done === 0 ? cardUrl(h.slug) : null;
+  await deliver(phoneNumberId, from, { reply: body, image, options, menu: null });
+  await remember(store, from, `(Asked for today's ${h.name} task)`, body);
+}
+
+function progressBar7(done) { return "▓".repeat(done) + "░".repeat(Math.max(0, CHALLENGE_LEN - done)); }
+
+async function killDone({ phoneNumberId, from, store }, user) {
+  const h = HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
+  if (!h) {
+    await sendButtons(phoneNumberId, from, { body: "You don't have a head challenge running yet. Pick one to fight 👇", options: [BTN.killMenu, BTN.check, BTN.quiz] });
+    return;
+  }
+  const st = headState(user, h.slug);
+  const today = istDate();
+  if (st.lastDoneDate === today) {
+    await sendButtons(phoneNumberId, from, { body: `Already counted ✅ Day ${st.done + 1} against *${h.name}* unlocks tomorrow 🌅`, options: [BTN.mind, BTN.quiz, BTN.progress] });
+    return;
+  }
+  st.done += 1;
+  st.lastDoneDate = today;
+
+  if (st.done >= CHALLENGE_LEN) {
+    user.slain = [...new Set([...(user.slain || []), h.slug])];
+    delete user.activeHead;
+    await saveUser(store, from, user);
+    const n = user.slain.length;
+    const body = `🗡️ *${h.name} is slain!*\n7 days of ${h.virtue}. That's real Vijayadashami 🙏\n\n${slainBar(user.slain)}  *${n}/10 heads slain*\n\n` +
+      (n >= 10 ? "🏆 *ALL TEN HEADS SLAIN!* You are an Inner Victor. Keep the practices alive, because heads like to grow back 😉" :
+        "A head can grow back if you stop watching it, so keep one practice going. Ready for the next head?");
+    const options = n >= 10 ? [BTN.check, BTN.quiz, BTN.story] : [BTN.otherHeads, BTN.quiz, BTN.progress];
+    await sendButtons(phoneNumberId, from, { body, options, image: cardUrl(n >= 10 ? "victor" : h.slug) });
+    await remember(store, from, BTN.killDone, body);
+    return;
+  }
+  await saveUser(store, from, user);
+  const cheers = ["Strong! 💪", "Shabaash! 👏", "One more strike! ⚔️", "Beautiful! 🌸", "The head is weakening! 🔥", "Almost there! 🗡️"];
+  const body = `✅ ${cheers[(st.done - 1) % cheers.length]} Day ${st.done} against *${h.name}* done.\n${progressBar7(st.done)}  ${st.done}/7\n\n` +
+    `Your next task unlocks tomorrow 🌅 Tonight, notice once when ${h.name} tried to talk you out of it.`;
+  const options = user.remind ? [BTN.mind, BTN.quiz, BTN.progress] : [BTN.remind, BTN.mind, BTN.quiz];
+  await sendButtons(phoneNumberId, from, { body, options });
+  await remember(store, from, BTN.killDone, body);
+}
+
+async function mindTricks({ phoneNumberId, from, store }, user) {
+  const h = HEAD_CHALLENGES.find((x) => x.slug === (user.activeHead || user.headView));
+  const reply = MIND_TOOLKIT + (h ? `\n\n⚔️ *For ${h.name}*, the mind's favourite line is: _${h.trick}_ Now you'll recognise it.` : "");
+  const options = h && user.activeHead ? [BTN.killNext, BTN.otherHeads, BTN.quiz] : [BTN.killMenu, BTN.check, BTN.quiz];
+  await deliver(phoneNumberId, from, { reply, image: null, options, menu: null });
+  await remember(store, from, BTN.mind, reply);
+}
+
 // ---------- Inner Ravan self-check ----------
 
 async function startCheck(ctx, user) {
@@ -322,7 +461,7 @@ async function finishCheck({ phoneNumberId, from, store }, user) {
   } else {
     const lines = top.map((h, i) => `${["1️⃣", "2️⃣", "3️⃣"][i]} *${h.name}* (${h.en})  →  ${h.virtue}`).join("\n");
     body = `🪞 *Your Inner Ravan*\n\nThe heads asking for your attention most:\n\n${lines}\n\nEveryone carries all ten. Seeing them clearly is the first victory 🙏\n\nWant to start with *${top[0].name}*?`;
-    options = [`Help with ${top[0].name}`.slice(0, 20), BTN.journey, BTN.quiz];
+    options = [`Kill ${top[0].name} ⚔️`, BTN.journey, BTN.quiz];
     image = cardUrl(top[0].slug);
   }
   if (!(await sendButtons(phoneNumberId, from, { body, options, image }))) await sendText(phoneNumberId, from, body);
@@ -458,6 +597,13 @@ async function showProgress({ phoneNumberId, from, store }, user, lead = "") {
     parts.push("You haven't started the 10-day *Defeat Ravan* journey yet. One head a day, ten days, real change 🔥");
   }
   if (user.check?.result?.length) parts.push(`🪞 Your top heads: ${user.check.result.map((h) => h.name).join(", ")}`);
+  const slainList = user.slain || [];
+  if (slainList.length || user.activeHead) {
+    const act = HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
+    parts.push(`👹 *Heads slain:* ${slainBar(slainList)}  ${slainList.length}/10` +
+      (act ? `
+⚔️ Fighting *${act.name}*: day ${(user.heads[act.slug].done || 0)}/7 done` : ""));
+  }
   const body = parts.join("\n\n");
   let options;
   if (j && !j.finished) options = j.lessonDate === istDate() && !j.done.includes(j.day) ? [BTN.done, BTN.more, BTN.quiz] : [BTN.next, BTN.quiz, BTN.story];

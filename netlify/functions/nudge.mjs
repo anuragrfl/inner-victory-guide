@@ -7,6 +7,7 @@
 
 import { getStore } from "@netlify/blobs";
 import { HEADS, BTN, istDate } from "../../lib/flows.mjs";
+import { HEAD_CHALLENGES } from "../../lib/challenges.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
 const H = 3600 * 1000;
@@ -24,24 +25,37 @@ export default async () => {
     let user;
     try { user = await store.get(key, { type: "json" }); } catch { continue; }
     if (!user?.remind || !user.pn || !user.lastInAt) continue;
-    const j = user.journey;
-    if (!j || j.finished || !j.day) continue;
-
     const since = now - user.lastInAt;
     if (since < 20 * H || since > 23 * H) continue;          // inside the free window, near its end
     if (user.nudgedAt && user.nudgedAt > user.lastInAt) continue; // once per window
 
     const today = istDate(now);
-    const todayDone = j.done.includes(j.day);
-    let body;
-    if (j.lessonDate !== today && todayDone && HEADS[j.day]) {
-      const next = HEADS[j.day];
-      body = `🌅 Good day! *Day ${j.day + 1}: ${next.name}* is ready for you.\n\n👀 ${next.tease}\n\nTap below when you have 2 minutes 🙏`;
-    } else if (!todayDone) {
-      body = `🙏 A gentle nudge: today's small challenge for *${HEADS[j.day - 1].name}* is waiting.\n\nTry it, then tap *Done ✅*. Even one minute counts.`;
-    } else continue;
+    let body = null, options = null;
+    const j = user.journey;
+    if (j && !j.finished && j.day) {
+      const todayDone = j.done.includes(j.day);
+      if (j.lessonDate !== today && todayDone && HEADS[j.day]) {
+        const next = HEADS[j.day];
+        body = `🌅 Good day! *Day ${j.day + 1}: ${next.name}* is ready for you.\n\n👀 ${next.tease}\n\nTap below when you have 2 minutes 🙏`;
+        options = [BTN.next, BTN.quiz];
+      } else if (!todayDone) {
+        body = `🙏 A gentle nudge: today's small challenge for *${HEADS[j.day - 1].name}* is waiting.\n\nTry it, then tap *Done ✅*. Even one minute counts.`;
+        options = [BTN.done, BTN.next];
+      }
+    }
+    const h = !body && user.activeHead && HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
+    if (h) {
+      const st = user.heads?.[h.slug] || { done: 0 };
+      if (st.lastDoneDate && st.lastDoneDate !== today) {
+        body = `⚔️ Day ${st.done + 1}/7 against *${h.name}* is ready.\n\nYour mind may say it can wait. That's ${h.name} talking 😉`;
+        options = [BTN.killNext, BTN.mind];
+      } else if (st.taskDate && st.taskDate !== st.lastDoneDate && st.lastDoneDate !== today) {
+        body = `⚔️ Your task against *${h.name}* is still waiting. Try it, then tap *Done ⚔️*.`;
+        options = [BTN.killDone, BTN.mind];
+      }
+    }
+    if (!body) continue;
 
-    const options = todayDone ? [BTN.next, BTN.quiz] : [BTN.done, BTN.next];
     const to = key.slice("user/".length);
     const ok = await sendButtons(user.pn, to, body, options);
     user.nudgedAt = now;
