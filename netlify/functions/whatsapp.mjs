@@ -104,7 +104,7 @@ export default async (req) => {
     await store.delete(`chat/${from}`);
     if (user.check && !user.check.result) { delete user.check; await saveUser(store, from, user); }
     await sendButtons(phoneNumberId, from, {
-      body: "Fresh start 🌸 Where shall we begin?",
+      body: "Jai Mata Di 🙏 Fresh start 🌸 Where shall we begin?",
       options: [BTN.check, BTN.journey, BTN.quiz],
       image: cardUrl("mandala"),
     });
