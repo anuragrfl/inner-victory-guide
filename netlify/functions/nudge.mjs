@@ -8,6 +8,7 @@
 import { getStore } from "@netlify/blobs";
 import { HEADS, BTN, istDate } from "../../lib/flows.mjs";
 import { HEAD_CHALLENGES } from "../../lib/challenges.mjs";
+import { setLang, trBody, trLabel } from "../../lib/i18n.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
 const H = 3600 * 1000;
@@ -57,7 +58,8 @@ export default async () => {
     if (!body) continue;
 
     const to = key.slice("user/".length);
-    const ok = await sendButtons(user.pn, to, body, options);
+    setLang(user.lang);
+    const ok = await sendButtons(user.pn, to, (await trBody(body)).slice(0, 1024), options.map(trLabel));
     user.nudgedAt = now;
     await store.setJSON(key, user);
     if (ok) sent++;

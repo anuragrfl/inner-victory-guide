@@ -22,6 +22,8 @@ import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mj
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
+import { HI_HEAD_NAMES } from "../../lib/hi.mjs";
+import { setLang, isHindi, trLabel, trBody, toEnglish, wantsLanguage, hasDevanagari } from "../../lib/i18n.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
@@ -94,8 +96,9 @@ export default async (req) => {
 
   markRead(phoneNumberId, msg.id).catch(() => {});
 
-  const text = incomingText(msg);
-  if (!text) {
+  const rawText = incomingText(msg);
+  if (!rawText) {
+    setLang((await loadUser(store, from)).lang);
     await sendButtons(phoneNumberId, from, {
       body: "I can only read text for now 🙏 Tap a button or type your question about the Devis, Nidhis, Siddhis or Ravan's 10 heads.",
       options: [BTN.check, BTN.journey, BTN.quiz],
@@ -107,7 +110,22 @@ export default async (req) => {
   const user = await loadUser(store, from);
   user.lastInAt = Date.now();
   user.pn = phoneNumberId;
+  // Language: "हिंदी"/"hindi" or "english" switches; writing in Devanagari switches to Hindi automatically.
+  const askedLang = wantsLanguage(rawText);
+  if (askedLang) { user.lang = askedLang; user.langChosen = true; }
+  else if (hasDevanagari(rawText) && user.lang !== "hi" && !user.langChosen) user.lang = "hi";
+  setLang(user.lang);
   await saveUser(store, from, user);
+  if (askedLang) {
+    await sendList(phoneNumberId, from, {
+      body: askedLang === "hi" ? "जय माता दी 🙏 अब से हम हिंदी में बात करेंगे 🌸\n\nबताइए, आज आपका मन कैसा है? या नीचे से कोई द्वार चुनें 👇\n\n(अंग्रेज़ी के लिए *English* लिखें)"
+        : "Jai Mata Di 🙏 We'll talk in English now 🌸\n\nHow is your heart today? Or pick a door below 👇\n\n(For Hindi, type *हिंदी*)",
+      ...MAIN_MENU,
+    });
+    await remember(store, from, rawText, askedLang === "hi" ? "(Switched to Hindi. Reply in Hindi from now on.)" : "(Switched to English.)");
+    return ok();
+  }
+  const text = toEnglish(rawText);
   // Safety first: if someone may be in danger, share real help before anything else.
   if (isCrisis(text)) {
     user.care = Date.now();
@@ -119,7 +137,8 @@ export default async (req) => {
     return ok();
   }
 
-  const cmd = FEELINGS.some((f) => f.title === text) ? "feeling" : detectCommand(text);
+  let cmd = FEELINGS.some((f) => f.title === text) ? "feeling" : detectCommand(text);
+  if (!cmd && hasDevanagari(text) && text.length < 80 && /(महसूस|लग रहा|लग रही|हूँ|हूं)/.test(text) && findFeeling(text)) cmd = "feeling";
 
   if (cmd === "reset") {
     await store.delete(`chat/${from}`);
@@ -490,6 +509,11 @@ async function killMenu({ phoneNumberId, from, store }, user) {
   const slain = user.slain || [];
   const rows = HEAD_CHALLENGES.map((h) => {
     const st = user.heads?.[h.slug];
+    if (isHindi()) {
+      const hn = HI_HEAD_NAMES[h.slug];
+      const st2 = slain.includes(h.slug) ? "🗡️ मारा गया!" : st?.done ? `जारी · ${st.done}/7 दिन` : `${hn.virtue} से जीतें`;
+      return { title: `⚔️ ${h.name}`, description: `${hn.en} · ${st2}`.slice(0, 72) };
+    }
     const status = slain.includes(h.slug) ? "🗡️ Slain!" : st?.done ? `In progress · ${st.done}/7 days` : `Kill it with ${h.virtue}`;
     return { title: `⚔️ ${h.name}`, description: `${h.en} · ${status}`.slice(0, 72) };
   });
@@ -861,6 +885,7 @@ function clip(s, n) {
 
 // Send one reply, combining picture, text and choices into as few messages as WhatsApp allows.
 async function deliver(phoneNumberId, to, { reply, image, options, menu }) {
+  reply = await trBody(reply);
   const fits = reply.length <= MAX_BODY;
 
   if (options.length >= 1) {
@@ -946,6 +971,7 @@ async function askClaude(messages, person = "") {
       system: [
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
         ...(person ? [{ type: "text", text: `ABOUT THIS PERSON (private, from the app):\n${person}` }] : []),
+        ...(isHindi() ? [{ type: "text", text: "LANGUAGE: This person has chosen Hindi. Write your whole reply in simple, warm, natural Hindi (Devanagari script), like a caring friend in India. Write [[options]] and [[menu]] choices in Hindi too (each at most 20 characters). Card tags stay as they are." }] : []),
       ],
       messages,
     }),
@@ -984,31 +1010,38 @@ async function graphSend(phoneNumberId, payload, label) {
   }
 }
 
-function sendText(phoneNumberId, to, body) {
+// Every outgoing text passes through the language layer (no-op for English).
+async function sendText(phoneNumberId, to, body) {
+  body = await trBody(body);
+  if (body.length > 4096) body = body.slice(0, 4090) + "…";
   return graphSend(phoneNumberId, { to, type: "text", text: { preview_url: false, body } }, "text");
 }
 
-function sendImage(phoneNumberId, to, link, caption) {
+async function sendImage(phoneNumberId, to, link, caption) {
+  if (caption) caption = (await trBody(caption)).slice(0, MAX_BODY);
   return graphSend(phoneNumberId, { to, type: "image", image: caption ? { link, caption } : { link } }, "image");
 }
 
-function sendButtons(phoneNumberId, to, { body, options, image }) {
+async function sendButtons(phoneNumberId, to, { body, options, image }) {
+  body = await trBody(body);
+  const titles = [...new Set(options.slice(0, 3).map((o) => clip(trLabel(o), 20)))];
   const interactive = {
     type: "button",
     body: { text: body.slice(0, MAX_BODY) },
-    action: { buttons: options.slice(0, 3).map((title, i) => ({ type: "reply", reply: { id: `opt_${i + 1}`, title } })) },
+    action: { buttons: titles.map((title, i) => ({ type: "reply", reply: { id: `opt_${i + 1}`, title } })) },
   };
   if (image) interactive.header = { type: "image", image: { link: image } };
   return graphSend(phoneNumberId, { to, type: "interactive", interactive }, "buttons");
 }
 
-function sendList(phoneNumberId, to, { body, button, rows }) {
+async function sendList(phoneNumberId, to, { body, button, rows }) {
+  body = await trBody(body);
   const interactive = {
     type: "list",
     body: { text: body.slice(0, MAX_BODY) },
     action: {
-      button: button || "Choose",
-      sections: [{ title: "Choose one", rows: rows.slice(0, 10).map((r, i) => ({ id: `row_${i + 1}`, title: r.title, ...(r.description ? { description: r.description.slice(0, 72) } : {}) })) }],
+      button: clip(trLabel(button || "Choose"), 20),
+      sections: [{ title: trLabel("Choose one"), rows: rows.slice(0, 10).map((r, i) => ({ id: `row_${i + 1}`, title: clip(trLabel(r.title), 24), ...(r.description ? { description: trLabel(r.description).slice(0, 72) } : {}) })) }],
     },
   };
   return graphSend(phoneNumberId, { to, type: "interactive", interactive }, "menu");
