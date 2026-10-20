@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
+import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
@@ -31,16 +32,16 @@ const MAX_BODY = 1024;                              // interactive message body 
 const MAIN_MENU = {
   button: "Explore 🪔",
   rows: [
-    { title: "Ravan's 10 heads 🔥", description: "The ten negatives inside every human" },
-    { title: "The 9 Devis 🌸", description: "Navratri: root to crown, one quality a night" },
-    { title: "The 9 Nidhis 💎", description: "Inner treasures that make life rich" },
-    { title: "The 8 Siddhis ✨", description: "Inner powers, used for good" },
+    { title: "How I feel 💛", description: "Check in: share a feeling, get a teaching and a practice" },
+    { title: "Deep question 💭", description: "A question about life, to reflect on together" },
+    { title: "Kill a head ⚔️", description: "Pick one of Ravan's heads: 7-day challenge" },
     { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
     { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
-    { title: "Kill a head ⚔️", description: "Pick one of Ravan's heads: 7-day challenge" },
     { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
-    { title: "Today's challenge 💪", description: "One tiny practice for today" },
     { title: "Tell me a story 📖", description: "A short story with a lesson" },
+    { title: "Ravan's 10 heads 🔥", description: "The ten negatives inside every human" },
+    { title: "The 9 Devis 🌸", description: "Navratri: root to crown, one quality a night" },
+    { title: "Nidhis & Siddhis 💎", description: "Inner treasures and inner powers" },
   ],
 };
 
@@ -86,7 +87,18 @@ export default async (req) => {
   user.lastInAt = Date.now();
   user.pn = phoneNumberId;
   await saveUser(store, from, user);
-  const cmd = detectCommand(text);
+  // Safety first: if someone may be in danger, share real help before anything else.
+  if (isCrisis(text)) {
+    user.care = Date.now();
+    delete user.quiz; if (user.check && !user.check.result) delete user.check;
+    await saveUser(store, from, user);
+    await sendText(phoneNumberId, from, CRISIS_MESSAGE);
+    await remember(store, from, text, CRISIS_MESSAGE);
+    console.log("Care message sent");
+    return ok();
+  }
+
+  const cmd = FEELINGS.some((f) => f.title === text) ? "feeling" : detectCommand(text);
 
   if (cmd === "reset") {
     await store.delete(`chat/${from}`);
@@ -144,6 +156,14 @@ export default async (req) => {
       break; // "done" with nothing active: let the guide reply normally
     }
     case "progress": await showProgress(ctx, user); return ok();
+    case "checkin": await feelingsMenu(ctx, user); return ok();
+    case "feeling": {
+      const f = findFeeling(text);
+      if (f) { await shareFeeling(ctx, user, f, text); return ok(); }
+      break;
+    }
+    case "deepq": await askDeepQuestion(ctx, user); return ok();
+    case "mood": await showMood(ctx, user); return ok();
     case "kill_menu": await killMenu(ctx, user); return ok();
     case "kill_head": {
       const h = findHead(text);
@@ -157,6 +177,12 @@ export default async (req) => {
     case "mind": await mindTricks(ctx, user); return ok();
     case "remind_on": await setReminder(ctx, user, true); return ok();
     case "remind_off": await setReminder(ctx, user, false); return ok();
+  }
+
+  // An answer to a deep question gets a listening, reflective reply.
+  if (!cmd && user.pendingQ && Date.now() - user.pendingQ.at < 24 * 3600 * 1000) {
+    await answerDeepQuestion(ctx, user, text);
+    return ok();
   }
 
   await converse(ctx, user, text);
@@ -208,6 +234,7 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
   const parsed = parseReply(answer);
   if (opts.options) { parsed.options = opts.options; parsed.menu = null; }
   if (opts.card !== undefined) parsed.card = opts.card;
+  if (user.care && Date.now() - user.care < 24 * 3600 * 1000) parsed.card = null; // no picture cards right after distress
   let reply = toWhatsApp(parsed.text);
   if (opts.prefix) reply = `${opts.prefix}\n\n${reply}`;
   const image = parsed.card && parsed.card !== chat.lastCard ? cardUrl(parsed.card) : null;
@@ -288,6 +315,70 @@ async function answerQuiz(ctx, user, text) {
   const options = [BTN.quizAgain, BTN.story, third];
   if (!(await sendButtons(phoneNumberId, from, { body, options }))) await sendText(phoneNumberId, from, body);
   await remember(store, from, `(Took a quiz on ${QUIZ_TOPICS[topic]})`, `Quiz finished: ${score}/${QUIZ_LEN}.\n(Options offered: ${options.join(" / ")})`);
+}
+
+// ---------- heart: feelings, deep questions, mood ----------
+
+async function feelingsMenu({ phoneNumberId, from, store }, user) {
+  const body = "💛 *How are you feeling right now?*\nBe honest; every feeling is welcome here. Tap the one closest to your heart 👇";
+  const rows = FEELINGS.map((f) => ({ title: f.title }));
+  if (!(await sendList(phoneNumberId, from, { body, button: "My feeling", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + FEELINGS.map((f) => f.title).join("\n"));
+  }
+  await remember(store, from, BTN.feel, body);
+}
+
+async function shareFeeling(ctx, user, f, text) {
+  user.moods = [...(user.moods || []), { d: istDate(), m: f.key, at: Date.now() }].slice(-60);
+  await saveUser(ctx.store, ctx.from, user);
+  const recentLow = user.moods.slice(-5).filter((m) => !FEELINGS.find((x) => x.key === m.m)?.positive).length;
+  const note = `The person just shared that they feel *${f.key}*. Respond like a caring friend: ` +
+    `first acknowledge the feeling warmly in their language (1-2 lines; ${f.positive ? "celebrate with them" : "validate it, no 'just be positive', no fixing yet"}); ` +
+    `then one short teaching that genuinely fits (${f.hint}); then the 1-minute practice they can do right now, in simple steps; ` +
+    `end with ONE gentle open question inviting them to share more about what's behind the feeling. No options, no menu. Under 120 words.` +
+    (recentLow >= 3 && !f.positive ? " They have felt low several times recently: gently ask how they are coping, encourage talking to someone they trust, and if it sounds heavy, softly mention Tele-MANAS 14416 (free, 24x7)." : "");
+  await converse(ctx, user, text, { note, card: f.card, options: [] });
+}
+
+async function askDeepQuestion({ phoneNumberId, from, store }, user) {
+  const q = pickDeepQuestion(user.deepSeen || []);
+  user.deepSeen = [...(user.deepSeen || []), q.id].slice(-40);
+  user.pendingQ = { id: q.id, q: q.q, at: Date.now() };
+  await saveUser(store, from, user);
+  const body = `💭 *A question for you*\n\n_${q.q}_\n\nTake your time and reply in your own words; there's no right answer 🙏\n(Type *another* for a different question.)`;
+  await sendText(phoneNumberId, from, body);
+  await remember(store, from, BTN.deepq, body);
+}
+
+async function answerDeepQuestion(ctx, user, text) {
+  const q = user.pendingQ;
+  user.journal = [...(user.journal || []), { q: q.q, a: text.slice(0, 400), d: istDate() }].slice(-20);
+  delete user.pendingQ;
+  await saveUser(ctx.store, ctx.from, user);
+  const note = `They are answering your reflection question: "${q.q}". Listen deeply. ` +
+    "First reflect back what you heard, in their own words (1-2 lines), and honour their honesty. " +
+    "Then offer ONE insight from the wisdom that truly fits what they said (a line from the Gita, a Devi's quality, a Nidhi, or the head of Ravan at play), and one tiny practice for today. " +
+    "If they shared pain, stay gentle and human; don't rush to teach. Finish by either asking one soft follow-up question (no options) or offering [[options: Another question 💭 | How I feel 💛 | Kill a head ⚔️]] if they seem complete. Under 130 words. " +
+    "If something sounds like serious distress, encourage reaching out to someone they trust and mention Tele-MANAS 14416.";
+  await converse(ctx, user, text, { note });
+}
+
+async function showMood({ phoneNumberId, from, store }, user) {
+  const moods = user.moods || [];
+  let body;
+  if (!moods.length) {
+    body = "📈 You haven't checked in yet. Tap *How I feel 💛* anytime, and I'll keep a gentle record of your week.";
+  } else {
+    const recent = moods.slice(-14);
+    const pos = recent.filter((m) => FEELINGS.find((f) => f.key === m.m)?.positive).length;
+    const counts = {};
+    for (const m of recent) counts[m.m] = (counts[m.m] || 0) + 1;
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    body = `📈 *Your recent check-ins*\n${moodLine(moods, 10)}\n\nMost often: *${top}*\nBright moments: ${pos} of ${recent.length}\n\n` +
+      (pos >= recent.length / 2 ? "Your heart has had good light lately 🌸 Keep doing what helps." : "It's been a heavier stretch 💛 Be gentle with yourself. Small practices add up, and talking to someone you trust helps too.");
+  }
+  await sendButtons(phoneNumberId, from, { body, options: [BTN.feel, BTN.deepq, BTN.killMenu] });
+  await remember(store, from, BTN.mood, body);
 }
 
 // ---------- Kill Ravan's 10 heads: 7-day challenges ----------
@@ -597,6 +688,7 @@ async function showProgress({ phoneNumberId, from, store }, user, lead = "") {
     parts.push("You haven't started the 10-day *Defeat Ravan* journey yet. One head a day, ten days, real change 🔥");
   }
   if (user.check?.result?.length) parts.push(`🪞 Your top heads: ${user.check.result.map((h) => h.name).join(", ")}`);
+  if (user.moods?.length) parts.push(`💛 *Recent feelings:* ${moodLine(user.moods, 7)}`);
   const slainList = user.slain || [];
   if (slainList.length || user.activeHead) {
     const act = HEAD_CHALLENGES.find((x) => x.slug === user.activeHead);
