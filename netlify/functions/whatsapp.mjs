@@ -22,7 +22,7 @@ import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mj
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
-import { HI_HEAD_NAMES } from "../../lib/hi.mjs";
+import { HI_HEAD_NAMES, WELCOME_EN } from "../../lib/hi.mjs";
 import { setLang, isHindi, trLabel, trBody, toEnglish, wantsLanguage, hasDevanagari } from "../../lib/i18n.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
@@ -140,14 +140,16 @@ export default async (req) => {
   let cmd = FEELINGS.some((f) => f.title === text) ? "feeling" : detectCommand(text);
   if (!cmd && hasDevanagari(text) && text.length < 80 && /(महसूस|लग रहा|लग रही|हूँ|हूं)/.test(text) && findFeeling(text)) cmd = "feeling";
 
-  if (cmd === "reset") {
+  // Welcome: on "reset", or when someone new (or back after a long gap) says hello.
+  const greeting = /^(hi+|hello+|hey+|hlo|namaste|namaskar|pranam|jai mata di|jai shree ram|jai shri ram|radhe radhe|ram ram|good (morning|afternoon|evening)|start|नमस्ते|नमस्कार|प्रणाम|जय माता दी|जय श्री राम|राधे राधे|राम राम|हाय|हेलो)(?![A-Za-z\u0900-\u097F])/i.test(text) && text.length < 40;
+  if (cmd === "reset" || (!cmd && greeting && !(await loadChat(store, from)).turns.length)) {
     await store.delete(`chat/${from}`);
-    if (user.check && !user.check.result) { delete user.check; await saveUser(store, from, user); }
-    await sendButtons(phoneNumberId, from, {
-      body: "Jai Mata Di 🙏 A fresh start 🌸\n\nTell me, how is your heart today?",
-      options: ["Happy 😊", "A bit stressed 😩", "Low 😔"],
-      image: cardUrl("mandala"),
-    });
+    if (user.check && !user.check.result) delete user.check;
+    user.welcomed = Date.now();
+    await saveUser(store, from, user);
+    const options = ["Happy 😊", "A bit stressed 😩", "Low 😔"];
+    await sendButtons(phoneNumberId, from, { body: WELCOME_EN, options, image: cardUrl("mandala") });
+    await remember(store, from, rawText, WELCOME_EN + `\n(Options offered: ${options.join(" / ")})`);
     return ok();
   }
 
