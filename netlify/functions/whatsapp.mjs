@@ -32,19 +32,38 @@ const MAX_BODY = 1024;                              // interactive message body 
 
 // Fixed menu anyone can open by typing "menu".
 const MAIN_MENU = {
-  button: "Explore 🪔",
+  button: "Open 🪔",
   rows: [
-    { title: "How I feel 💛", description: "Check in: share a feeling, get comfort and a practice" },
-    { title: "Meditate with me 🧘", description: "1-2 minute guided pauses: breath, calm, sleep" },
-    { title: "Deep question 💭", description: "A question about life and self-love, to reflect on" },
-    { title: "Kill a head ⚔️", description: "Pick one of Ravan's heads: 7-day challenge" },
-    { title: "10-day journey 🔥", description: "Defeat Ravan: one head a day, with streaks" },
-    { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
-    { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
-    { title: "Sacred places 🛕", description: "Shakti Peethas, Jyotirlingas, famous temples" },
-    { title: "Tell me a story 📖", description: "A short story with a lesson" },
-    { title: "9 Devis & treasures 🌸", description: "The 9 Devis, 9 Nidhis and 8 Siddhis" },
+    { title: "My heart 💛", description: "Share how you feel, reflect, self-love" },
+    { title: "Meditate 🧘", description: "1-2 minute guided pauses: breath, calm, sleep" },
+    { title: "Grow ⚔️", description: "Kill Ravan's heads, 10-day journey, self-check" },
+    { title: "Learn 📚", description: "Stories, quizzes, Devis, temples and more" },
   ],
+};
+
+// What each door opens.
+const DOORS = {
+  heart: { body: "💛 *My heart*\nThis is your space. What would feel good right now?", button: "Choose", rows: [
+    { title: "How I feel 💛", description: "Share a feeling; get comfort and a tiny practice" },
+    { title: "Deep question 💭", description: "One meaningful question about your life" },
+    { title: "Self-love 🌷", description: "A gentle reminder of your worth" },
+    { title: "My mood 📈", description: "Your recent check-ins" },
+  ] },
+  grow: { body: "⚔️ *Grow*\nSmall daily steps to defeat the Ravan within. Where shall we start?", button: "Choose", rows: [
+    { title: "Kill a head ⚔️", description: "Pick one head of Ravan: 7-day challenge" },
+    { title: "10-day journey 🔥", description: "One head a day, with streaks and a badge" },
+    { title: "Inner Ravan check 🪞", description: "10 quick questions: your top 3 heads" },
+    { title: "My progress 📊", description: "Streaks, heads slain, check result" },
+  ] },
+  learn: { body: "📚 *Learn*\nStories and wisdom to light the way. What are you curious about?", button: "Choose", rows: [
+    { title: "Tell me a story 📖", description: "A short story with a lesson" },
+    { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
+    { title: "Sacred places 🛕", description: "Shakti Peethas, Jyotirlingas, temples" },
+    { title: "The 9 Devis 🌸", description: "Navratri: one quality a night" },
+    { title: "Ravan's 10 heads 🔥", description: "The ten negatives inside every human" },
+    { title: "The 9 Nidhis 💎", description: "Inner treasures that make life rich" },
+    { title: "The 8 Siddhis ✨", description: "Inner powers, used for good" },
+  ] },
 };
 
 export default async (req) => {
@@ -106,15 +125,15 @@ export default async (req) => {
     await store.delete(`chat/${from}`);
     if (user.check && !user.check.result) { delete user.check; await saveUser(store, from, user); }
     await sendButtons(phoneNumberId, from, {
-      body: "Jai Mata Di 🙏 Fresh start 🌸 Where shall we begin?",
-      options: [BTN.feel, BTN.meditate, BTN.killMenu],
+      body: "Jai Mata Di 🙏 A fresh start 🌸\n\nTell me, how is your heart today?",
+      options: ["Happy 😊", "A bit stressed 😩", "Low 😔"],
       image: cardUrl("mandala"),
     });
     return ok();
   }
 
   if (cmd === "menu") {
-    await sendList(phoneNumberId, from, { body: "Here's everything we can explore together. Tap *Explore* and pick one 👇", ...MAIN_MENU });
+    await sendList(phoneNumberId, from, { body: "🪔 Four doors, one journey. Where would your heart like to go? 👇", ...MAIN_MENU });
     return ok();
   }
 
@@ -162,6 +181,12 @@ export default async (req) => {
       break; // "done" with nothing active: let the guide reply normally
     }
     case "progress": await showProgress(ctx, user); return ok();
+    case "door_heart": case "door_grow": case "door_learn": {
+      const d = DOORS[cmd.slice(5)];
+      if (!(await sendList(phoneNumberId, from, d))) await sendText(phoneNumberId, from, d.body + "\n\n" + d.rows.map((r) => r.title).join("\n"));
+      await remember(store, from, text, d.body);
+      return ok();
+    }
     case "meditate": await meditateMenu(ctx, user); return ok();
     case "selflove": await converse(ctx, user, text, { note: "They want a self-love moment. Warmly remind them of their worth (specific, not generic), share one line of wisdom (e.g. Gita 6.5: be your own friend), give one tiny self-love practice to do today, and end with a gentle personal question about how they treat themselves. Under 110 words. No options or menu.", card: "kushmanda", options: [] }); return ok();
     case "sacred": await sacredMenu(ctx, user); return ok();
