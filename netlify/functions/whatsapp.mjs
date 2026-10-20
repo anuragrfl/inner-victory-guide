@@ -13,7 +13,7 @@
 
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
-import { SYSTEM_PROMPT } from "../../lib/knowledge.mjs";
+import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 
 const GRAPH = `https://graph.facebook.com/${process.env.GRAPH_API_VERSION || "v25.0"}`;
 const HISTORY_TURNS = 10;        // remembered messages per person (user + bot)
@@ -63,24 +63,36 @@ export default async (req) => {
   }
 
   let history = [];
+  let lastCard = null;
   try {
     const saved = await store.get(historyKey, { type: "json" });
-    if (saved && Date.now() - (saved.at || 0) < HISTORY_TTL_MS) history = saved.turns || [];
+    if (saved && Date.now() - (saved.at || 0) < HISTORY_TTL_MS) { history = saved.turns || []; lastCard = saved.lastCard || null; }
   } catch { history = []; }
 
   const messages = trimHistory([...history, { role: "user", content: text }]);
 
-  let reply;
+  let answer;
   try {
-    reply = await askClaude(messages);
+    answer = await askClaude(messages);
   } catch (err) {
     console.error("Claude error:", err);
     await sendText(phoneNumberId, from, "Sorry, I couldn't answer just now. Please send your question again in a minute.");
     return ok();
   }
 
-  await sendText(phoneNumberId, from, reply);
-  await store.setJSON(historyKey, { at: Date.now(), turns: trimHistory([...messages, { role: "assistant", content: reply }]) });
+  // Pull out the [[card:slug]] tag Claude adds, send that picture first, then the text.
+  const { text: replyText, card } = extractCard(answer);
+  const reply = toWhatsApp(replyText);
+  const link = card && card !== lastCard ? `${siteUrl()}/cards/${card}.jpg` : null;
+  if (link && reply.length <= 1000) {
+    // Picture and answer arrive together as one message (WhatsApp captions allow up to 1024 characters).
+    const sent = await sendImage(phoneNumberId, from, link, reply);
+    if (!sent) await sendText(phoneNumberId, from, reply);
+  } else {
+    if (link) await sendImage(phoneNumberId, from, link);
+    await sendText(phoneNumberId, from, reply);
+  }
+  await store.setJSON(historyKey, { at: Date.now(), lastCard: card || lastCard, turns: trimHistory([...messages, { role: "assistant", content: reply }]) });
   return ok();
 };
 
@@ -132,7 +144,37 @@ async function askClaude(messages) {
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
   if (!text) throw new Error("Empty reply from Claude");
-  return toWhatsApp(text);
+  return text;
+}
+
+function extractCard(s) {
+  let card = null;
+  const text = s.replace(/\[\[\s*card\s*:\s*([a-z-]+)\s*\]\]/gi, (_, slug) => {
+    const k = slug.toLowerCase();
+    if (!card && CARD_SLUGS.has(k)) card = k;
+    return "";
+  }).trim();
+  return { text: text || s.trim(), card };
+}
+
+function siteUrl() {
+  return (process.env.CARDS_BASE_URL || process.env.URL || "https://inner-victory-guide.netlify.app").replace(/\/$/, "");
+}
+
+async function sendImage(phoneNumberId, to, link, caption) {
+  try {
+    const image = caption ? { link, caption } : { link };
+    const res = await fetch(`${GRAPH}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+      body: JSON.stringify({ messaging_product: "whatsapp", to, type: "image", image }),
+    });
+    if (!res.ok) { console.error("WhatsApp image send failed:", res.status, await res.text()); return false; }
+    return true;
+  } catch (e) {
+    console.error("WhatsApp image send error:", e);
+    return false;
+  }
 }
 
 // Convert any stray Markdown to WhatsApp formatting (*bold*, _italic_) and fit the length limit.
