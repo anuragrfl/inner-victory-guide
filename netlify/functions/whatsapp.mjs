@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
+import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
@@ -39,7 +40,7 @@ const MAIN_MENU = {
     { title: "Inner Ravan check 🪞", description: "10 quick questions: find your top 3 heads" },
     { title: "Quiz me 🎯", description: "3 quick questions, mixed topics" },
     { title: "Tell me a story 📖", description: "A short story with a lesson" },
-    { title: "Ravan's 10 heads 🔥", description: "The ten negatives inside every human" },
+    { title: "Sacred places 🛕", description: "Shakti Peethas, Jyotirlingas, famous temples" },
     { title: "The 9 Devis 🌸", description: "Navratri: root to crown, one quality a night" },
     { title: "Nidhis & Siddhis 💎", description: "Inner treasures and inner powers" },
   ],
@@ -160,6 +161,7 @@ export default async (req) => {
       break; // "done" with nothing active: let the guide reply normally
     }
     case "progress": await showProgress(ctx, user); return ok();
+    case "sacred": await sacredMenu(ctx, user); return ok();
     case "checkin": await feelingsMenu(ctx, user); return ok();
     case "feeling": {
       const f = findFeeling(text);
@@ -181,6 +183,14 @@ export default async (req) => {
     case "mind": await mindTricks(ctx, user); return ok();
     case "remind_on": await setReminder(ctx, user, true); return ok();
     case "remind_off": await setReminder(ctx, user, false); return ok();
+  }
+
+  // Taps in the Sacred places menus.
+  if (!cmd) {
+    const g = findTempleGroup(text);
+    if (g) { await templeList(ctx, user, g); return ok(); }
+    const tp = /^🛕/.test(text) ? findTemple(text) : null;
+    if (tp) { await templeStory(ctx, user, tp, text); return ok(); }
   }
 
   // An answer to a deep question gets a listening, reflective reply.
@@ -321,6 +331,34 @@ async function answerQuiz(ctx, user, text) {
   const options = [BTN.quizAgain, BTN.story, third];
   if (!(await sendButtons(phoneNumberId, from, { body, options }))) await sendText(phoneNumberId, from, body);
   await remember(store, from, `(Took a quiz on ${QUIZ_TOPICS[topic]})`, `Quiz finished: ${score}/${QUIZ_LEN}.\n(Options offered: ${options.join(" / ")})`);
+}
+
+// ---------- sacred places ----------
+
+async function sacredMenu({ phoneNumberId, from, store }, user) {
+  const body = "🛕 *Sacred places of India*\nEvery tirtha carries a story, and every story a teaching. Where shall we go? 👇";
+  const rows = [...TEMPLE_GROUPS.map((g) => ({ title: g.title, description: g.description })), { title: BTN.templeQuiz, description: "3 questions on India's temples" }];
+  if (!(await sendList(phoneNumberId, from, { body, button: "Choose", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + rows.map((r) => r.title).join("\n"));
+  }
+  await remember(store, from, BTN.sacred, body);
+}
+
+async function templeList({ phoneNumberId, from, store }, user, g) {
+  const body = `${g.title}\nTap a temple to hear its story 👇`;
+  const rows = g.temples.map((t) => ({ title: `🛕 ${t}` }));
+  if (!(await sendList(phoneNumberId, from, { body, button: "Temples", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + g.temples.join("\n"));
+  }
+  await remember(store, from, g.title, body);
+}
+
+async function templeStory(ctx, user, tp, text) {
+  const note = `Tell them about *${tp.name}* using the TEMPLE KNOWLEDGE. Shape: one vivid opening line; the legend in 2-3 short lines; ` +
+    "1-2 surprising facts; the main festival; one line connecting it to an inner teaching (a Devi, a Nidhi, or a head of Ravan it helps conquer). " +
+    "Do not give timings, prices, booking steps or rules as facts; if relevant, say they change and to check the official site or shrine board (name it if known). " +
+    "Under 140 words. End with a light question.";
+  await converse(ctx, user, text, { note, card: tp.group.card, options: [BTN.anotherTemple, BTN.templeQuiz, BTN.feel] });
 }
 
 // ---------- heart: feelings, deep questions, mood ----------

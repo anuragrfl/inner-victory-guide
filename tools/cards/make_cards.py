@@ -304,6 +304,30 @@ def victor_emblem():
     b.append(f'<path d="M300,262 C322,294 326,318 314,342 C309,352 304,356 300,357 C296,356 291,352 286,342 C274,318 278,294 300,262 Z" fill="#FFE6A8"/>')
     return svg("".join(b))
 
+def temple_emblem(variant="temple"):
+    g = GOLD; saffron = "#F08A2E"
+    b = [f'<circle cx="300" cy="300" r="285" fill="none" stroke="{g}" stroke-width="2" opacity="0.55"/>', rays(48, 225, 280, g, 2, 0.4)]
+    b.append(f'<circle cx="300" cy="300" r="220" fill="#1c0f22" stroke="{g}" stroke-width="3"/>')
+    # stepped plinth
+    for k, (w, y) in enumerate([(300, 430), (250, 410), (210, 392)]):
+        b.append(f'<rect x="{300-w/2}" y="{y}" width="{w}" height="20" fill="#3a2440" stroke="{g}" stroke-width="2"/>')
+    # sanctum with doorway
+    b.append(f'<rect x="215" y="300" width="170" height="92" fill="#4a2c50" stroke="{g}" stroke-width="3"/>')
+    b.append(f'<path d="M275,392 L275,345 Q300,318 325,345 L325,392 Z" fill="#140a18" stroke="{g}" stroke-width="2.5"/>')
+    b.append(f'<path d="M300,352 C310,365 311,375 304,384 C302,387 301,388 300,388 C299,388 298,387 296,384 C289,375 290,365 300,352 Z" fill="#FFD27A"/>')
+    # shikhara (curvilinear tower) with horizontal bands
+    b.append(f'<path d="M222,300 C226,230 262,170 300,140 C338,170 374,230 378,300 Z" fill="{saffron if variant=="shakti" else "#C97B3A"}" stroke="{g}" stroke-width="3"/>')
+    for y in (270, 240, 210, 182):
+        half = 74 - (300 - y) * 0.35
+        b.append(f'<line x1="{300-half:.1f}" y1="{y}" x2="{300+half:.1f}" y2="{y}" stroke="{g}" stroke-width="2" opacity="0.8"/>')
+    # amalaka + kalash + flag
+    b.append(f'<ellipse cx="300" cy="138" rx="26" ry="9" fill="{g}"/><path d="M290,130 Q300,104 310,130 Z" fill="{g}"/><line x1="300" y1="108" x2="300" y2="72" stroke="{g}" stroke-width="3"/>')
+    b.append(f'<path d="M300,72 L344,84 L300,96 Z" fill="{saffron}"/>')
+    # small side shrines
+    for x in (180, 420):
+        b.append(f'<path d="M{x-28},392 L{x-28},350 C{x-24},325 {x+24},325 {x+28},350 L{x+28},392 Z" fill="#3a2440" stroke="{g}" stroke-width="2"/>')
+    return svg("".join(b))
+
 # ---------- card composer ----------
 def compose(slug, theme, emblem_svg, kicker, hi, name, sub, body_line, bullets, footer_note=None, sub_italic=True, highlight=None):
     bg = background(*theme)
@@ -376,6 +400,16 @@ def run(only=None):
             "10-day journey complete", "अंतर्विजयी", "Inner Victor",
             "All ten heads of Ravan faced", "The real Vijayadashami is the victory inside.",
             [], footer_note="Keep one practice going, every day"))
+    if not only or "temple" in only:
+        made.append(compose("temple", ("#24122a", "#0b0610", "#8a4a2a"), temple_emblem(),
+            "Sacred places of India", "तीर्थ", "Sacred Places",
+            "Where the Divine is remembered", "Every tirtha carries a story, and every story carries a teaching.",
+            [], footer_note="Ask about any temple or Shakti Peetha"))
+    if not only or "shaktipeeth" in only:
+        made.append(compose("shaktipeeth", ("#2a0f14", "#0d0507", "#a0302a"), temple_emblem("shakti"),
+            "Shakti Peethas", "शक्तिपीठ", "Shakti Peetha",
+            "Where Sati's presence remains", "Each peetha is a seat of the Goddess, guarded by a Bhairava.",
+            [], footer_note="Ask about Kamakhya, Vaishno Devi, Kalighat and more"))
     return made
 
 if __name__ == "__main__":
