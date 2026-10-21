@@ -20,6 +20,7 @@ import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRIS
 import { MEDITATIONS, findMeditation } from "../../lib/meditate.mjs";
 import { PRACTICES, findPractice } from "../../lib/practices.mjs";
 import { COLLECTIONS, rowTitle, findExplore } from "../../lib/explore.mjs";
+import { HOOKS, pickHook, hookAnswer } from "../../lib/hooks.mjs";
 import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
@@ -42,6 +43,7 @@ const MAIN_MENU = {
     { title: "Meditate 🧘", description: "1-2 minute guided pauses: breath, calm, sleep" },
     { title: "Grow ⚔️", description: "Kill Ravan's heads, 10-day journey, self-check" },
     { title: "Learn 📚", description: "9 Devis, Ravan's 10 heads, Siddhis, temples" },
+    { title: "Did you know? 💡", description: "Fun facts and real meanings" },
   ],
 };
 
@@ -218,6 +220,7 @@ export default async (req) => {
     case "selflove": await converse(ctx, user, text, { note: "They want a self-love moment. Warmly remind them of their worth (specific, not generic), share one line of wisdom (e.g. Gita 6.5: be your own friend), give one tiny self-love practice to do today, and end with a gentle personal question about how they treat themselves. Under 110 words. No options or menu.", card: "kushmanda", options: [] }); return ok();
     case "sacred": await sacredMenu(ctx, user); return ok();
     case "practices": await practicesMenu(ctx, user); return ok();
+    case "hook": await sendHook(ctx, user); return ok();
     case "explore_devi": case "explore_nidhi": case "explore_siddhi": await exploreMenu(ctx, user, cmd.slice(8)); return ok();
     case "explore_next": {
       const kind = /nidhi/i.test(text) ? "nidhi" : /siddhi/i.test(text) ? "siddhi" : "devi";
@@ -258,6 +261,13 @@ export default async (req) => {
   if (!cmd && user.pendingGratitude && Date.now() - user.pendingGratitude < 12 * 3600 * 1000) {
     await saveGratitude(ctx, user, text);
     return ok();
+  }
+
+  // An answer to a "Did you know?" guess.
+  if (!cmd && user.hook && Date.now() - user.hook.at < 12 * 3600 * 1000) {
+    const h = HOOKS.find((x) => x.id === user.hook.id);
+    const i = h ? hookAnswer(h, text) : -1;
+    if (i >= 0) { await answerHook(ctx, user, h, i, text); return ok(); }
   }
 
   // A Devi, Nidhi or Siddhi chosen from its list.
@@ -364,6 +374,17 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
   chat.turns = [...messages.slice(0, -1), { role: "user", content: userTurn }, { role: "assistant", content: reply + offered }];
   chat.lastCard = parsed.card || chat.lastCard;
   await saveChat(store, from, chat);
+
+  // Now and then, in a light open chat, share a "Did you know?" with a picture and a guess.
+  if (!opts.note && !opts.options) {
+    user.sinceHook = (user.sinceHook || 0) + 1;
+    const calm = !(user.care && Date.now() - user.care < 3 * 86400000) && !isCrisis(text) && !(findFeeling(text) && !findFeeling(text).positive);
+    if (calm && user.sinceHook >= 5 && (user.hookSeen || []).length < HOOKS.length) {
+      await sendHook({ phoneNumberId, from, store }, user);
+    } else {
+      await saveUser(store, from, user);
+    }
+  }
 }
 
 // ---------- per-person state (journey, self-check) ----------
@@ -485,6 +506,30 @@ async function saveGratitude(ctx, user, text) {
     (n >= 3 ? `Celebrate their streak: ${n} entries so far. ` : "Invite them to make it a nightly habit, 3 things before sleep. ") +
     "End with a warm question about one of the things they wrote. Under 90 words.";
   await converse(ctx, user, text, { note, options: [BTN.feel, BTN.story, BTN.doorMeditate] });
+}
+
+// ---------- "Did you know?" hooks ----------
+
+async function sendHook({ phoneNumberId, from, store }, user) {
+  const h = pickHook(user.hookSeen || []);
+  user.hookSeen = [...new Set([...(user.hookSeen || []), h.id])];
+  user.hook = { id: h.id, at: Date.now() };
+  user.sinceHook = 0;
+  await saveUser(store, from, user);
+  if (!(await sendButtons(phoneNumberId, from, { body: h.en, options: h.options, image: cardUrl(h.card) }))) {
+    await sendText(phoneNumberId, from, h.en + "\n\n" + numbered(h.options));
+  }
+  await remember(store, from, "(Did you know?)", h.en + `\n(Options offered: ${h.options.join(" / ")})`);
+}
+
+async function answerHook({ phoneNumberId, from, store }, user, h, i, text) {
+  delete user.hook;
+  user.hookScore = { right: (user.hookScore?.right || 0) + (i === h.answer ? 1 : 0), played: (user.hookScore?.played || 0) + 1 };
+  await saveUser(store, from, user);
+  const verdict = i === h.answer ? ["✅ Spot on! 👏", "✅ Shabaash! 🌸", "✅ You got it! ✨"][user.hookScore.played % 3] : "Not quite, but a great guess 🙂";
+  const body = `${verdict}\n\n${h.explain}\n\n_Score: ${user.hookScore.right}/${user.hookScore.played}_ 🎯`;
+  await sendButtons(phoneNumberId, from, { body, options: h.next });
+  await remember(store, from, text, body + `\n(Options offered: ${h.next.join(" / ")})`);
 }
 
 // ---------- explore: 9 Devis, 9 Nidhis, 8 Siddhis ----------
