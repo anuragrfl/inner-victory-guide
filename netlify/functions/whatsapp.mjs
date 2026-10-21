@@ -22,7 +22,7 @@ import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mj
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
-import { HI_HEAD_NAMES, WELCOME_EN } from "../../lib/hi.mjs";
+import { HI_HEAD_NAMES, WELCOME_EN, FALLBACKS } from "../../lib/hi.mjs";
 import { setLang, isHindi, trLabel, trBody, toEnglish, wantsLanguage, hasDevanagari } from "../../lib/i18n.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
 
@@ -301,7 +301,11 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
     answer = await askClaude(messages, personContext(user));
   } catch (err) {
     console.error("Claude error:", err);
-    await sendText(phoneNumberId, from, "Sorry, I couldn't answer just now 🙏 Please send your message again in a minute.");
+    // Never show an error: a ready, warm reply keeps the conversation going.
+    const body = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
+    const options = [BTN.doorMeditate, BTN.feel, BTN.story];
+    if (!(await sendButtons(phoneNumberId, from, { body, options }))) await sendText(phoneNumberId, from, body);
+    await remember(store, from, text, body + `\n(Options offered: ${options.join(" / ")})`);
     return;
   }
 
