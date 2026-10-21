@@ -962,7 +962,17 @@ function trimHistory(turns) {
   return t;
 }
 
+// One retry for a busy server or an empty answer, so a person rarely sees "try again".
 async function askClaude(messages, person = "") {
+  try { return await askClaudeOnce(messages, person); }
+  catch (err) {
+    console.error("Claude first try failed, retrying:", String(err).slice(0, 300));
+    await new Promise((r) => setTimeout(r, 800));
+    return askClaudeOnce(messages, person);
+  }
+}
+
+async function askClaudeOnce(messages, person = "") {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -984,7 +994,7 @@ async function askClaude(messages, person = "") {
   if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-  if (!text) throw new Error("Empty reply from Claude");
+  if (!text) throw new Error(`Empty reply from Claude (stop_reason: ${data.stop_reason})`);
   return text;
 }
 
