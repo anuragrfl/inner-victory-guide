@@ -109,6 +109,9 @@ export default async (req) => {
   const ctx = { phoneNumberId, from, store, profileName };
   const user = await loadUser(store, from);
   user.lastInAt = Date.now();
+  user.firstAt = user.firstAt || user.lastInAt;
+  user.msgs = (user.msgs || 0) + 1;
+  if (profileName) user.name = profileName.slice(0, 40);
   user.pn = phoneNumberId;
   // Language: "हिंदी"/"hindi" or "english" switches; writing in Devanagari switches to Hindi automatically.
   const askedLang = wantsLanguage(rawText);
