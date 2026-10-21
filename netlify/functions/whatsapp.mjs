@@ -1044,7 +1044,8 @@ async function askClaudeOnce(messages, person = "") {
     },
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL || "claude-haiku-5-5",
-      max_tokens: 600,
+      max_tokens: 1500,
+      thinking: { type: "disabled" }, // chat replies are short; thinking tokens count toward max_tokens and could leave no text
       system: [
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
         ...(person ? [{ type: "text", text: `ABOUT THIS PERSON (private, from the app):\n${person}` }] : []),
