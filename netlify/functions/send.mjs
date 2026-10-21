@@ -25,6 +25,13 @@ export default async (req) => {
   const ageH = (Date.now() - user.lastInAt) / 3600000;
   if (ageH > 23.5) return json({ error: `last message ${ageH.toFixed(1)}h ago: outside WhatsApp's 24h window` }, 400);
 
+  // Never send the same message twice: if it's already in this person's recent history, stop.
+  try {
+    const chat = await store.get(`chat/${to}`, { type: "json" });
+    const recent = (chat?.turns || []).slice(-6).filter((t) => t.role === "assistant").map((t) => t.content).join("\n");
+    if (recent.includes(body.slice(0, 120))) return json({ ok: true, duplicate: true, note: "already sent earlier; not sent again", to: `…${last4}`, name: user.name || null });
+  } catch {}
+
   const payload = options.length
     ? { to, type: "interactive", interactive: { type: "button", body: { text: body.slice(0, 1024) },
         action: { buttons: options.slice(0, 3).map((title, i) => ({ type: "reply", reply: { id: `owner_${i}`, title: title.slice(0, 20) } })) } } }
