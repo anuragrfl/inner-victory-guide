@@ -914,6 +914,15 @@ function incomingText(msg) {
 // Split Claude's answer into text, card, options and menu.
 function parseReply(s) {
   let card = null, options = [], menu = null;
+  // The model sometimes copies our private history note "(Options offered: A / B / C)". Turn it into real buttons.
+  s = s.replace(/\n*\(\s*(Options|Menu) offered:\s*([^)]*)\)\s*/gi, (_, kind, list) => {
+    const items = list.split("/").map((x) => x.trim()).filter(Boolean);
+    if (items.length && !/\[\[\s*(options|menu)\s*:/i.test(s)) {
+      if (kind.toLowerCase() === "options") options = items.slice(0, 3).map((o) => clip(o, 20));
+      else if (items.length >= 2) menu = { button: "Choose", rows: items.slice(0, 10).map((t) => ({ title: clip(t, 24) })) };
+    }
+    return "\n";
+  });
   let text = s.replace(/\[\[\s*card\s*:\s*([a-z-]+)\s*\]\]/gi, (_, slug) => {
     const k = slug.toLowerCase();
     if (!card && CARD_SLUGS.has(k)) card = k;
