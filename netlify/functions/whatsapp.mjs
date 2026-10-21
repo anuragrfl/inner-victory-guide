@@ -18,6 +18,7 @@ import { getStore } from "@netlify/blobs";
 import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
 import { MEDITATIONS, findMeditation } from "../../lib/meditate.mjs";
+import { PRACTICES, findPractice } from "../../lib/practices.mjs";
 import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
@@ -48,6 +49,7 @@ const DOORS = {
   heart: { body: "💛 *My heart*\nThis is your space. What would feel good right now?", button: "Choose", rows: [
     { title: "How I feel 💛", description: "Share a feeling; get comfort and a tiny practice" },
     { title: "Deep question 💭", description: "One meaningful question about your life" },
+    { title: "Feel-good practices 🌻", description: "Gratitude, music, pride, kindness, rest" },
     { title: "Self-love 🌷", description: "A gentle reminder of your worth" },
     { title: "My mood 📈", description: "Your recent check-ins" },
   ] },
@@ -214,6 +216,8 @@ export default async (req) => {
     case "meditate": await meditateMenu(ctx, user); return ok();
     case "selflove": await converse(ctx, user, text, { note: "They want a self-love moment. Warmly remind them of their worth (specific, not generic), share one line of wisdom (e.g. Gita 6.5: be your own friend), give one tiny self-love practice to do today, and end with a gentle personal question about how they treat themselves. Under 110 words. No options or menu.", card: "kushmanda", options: [] }); return ok();
     case "sacred": await sacredMenu(ctx, user); return ok();
+    case "practices": await practicesMenu(ctx, user); return ok();
+    case "gratitude": await startGratitude(ctx, user); return ok();
     case "stuck": await converse(ctx, user, text, { note: "They are still stuck / restless / feel it isn't helping. Follow WHEN THEY'RE STILL STUCK exactly: honour their honesty warmly, normalise it with a Devi's example, never sound dismissive or wrap up. Under 100 words. End by offering the three doors.", options: [BTN.talk, BTN.story, BTN.devi] }); return ok();
     case "talk": await converse(ctx, user, text, { note: "They chose to talk it out. Ask ONE soft, specific question about what feels stuck right now (a person, a decision, a worry, a feeling in the body). Show you're fully here. 2-3 short lines. No options or menu, so they write in their own words.", options: [] }); return ok();
     case "story": await converse(ctx, user, text, { note: "Tell ONE short, vivid, genuinely interesting story from tradition (Devi Mahatmya, Ramayana, Mahabharata, Puranas or a temple legend), chosen to fit how they've been feeling if you know it. Shape: a one-line hook; the story in 4-6 short lines with a little suspense; the lesson in one bold line connected to their life; then one light question. Pick a different story than any told earlier in this chat. Say 'the story goes' for legends; never invent quotations. Under 150 words.", options: [BTN.anotherStory, BTN.devi, BTN.feel] }); return ok();
@@ -239,6 +243,23 @@ export default async (req) => {
     case "mind": await mindTricks(ctx, user); return ok();
     case "remind_on": await setReminder(ctx, user, true); return ok();
     case "remind_off": await setReminder(ctx, user, false); return ok();
+  }
+
+  if (user.pendingGratitude && (cmd ? cmd !== "gratitude" : /\?\s*$/.test(text))) { delete user.pendingGratitude; await saveUser(store, from, user); }
+  // A gratitude journal entry in reply to the prompt.
+  if (!cmd && user.pendingGratitude && Date.now() - user.pendingGratitude < 12 * 3600 * 1000) {
+    await saveGratitude(ctx, user, text);
+    return ok();
+  }
+
+  // A feel-good practice chosen from the list.
+  if (!cmd) {
+    const pr = findPractice(text);
+    if (pr) {
+      if (pr.key === "gratitude") await startGratitude(ctx, user);
+      else await converse(ctx, user, text, { note: pr.note + " Speak as a warm, trusted friend. End with the question.", card: pr.card, options: [] });
+      return ok();
+    }
   }
 
   // A meditation chosen from the list.
@@ -417,6 +438,39 @@ async function guideMeditation({ phoneNumberId, from, store }, user, med) {
   const prompt = `${med.text}\n\nTake your time. When you open your eyes, tell me: *how do you feel now?*`;
   await deliver(phoneNumberId, from, { reply: prompt, image: cardUrl(med.card), options: [BTN.calmer, BTN.restless, BTN.anotherMed], menu: null });
   await remember(store, from, med.title, prompt + "\n(Guided meditation sent. If they reply 'I feel calmer', celebrate it warmly and ask what they noticed; if 'Still restless', reassure them that's completely normal, the mind is like a puppy that learns to sit, and offer one gentler tip.)");
+}
+
+// ---------- feel-good practices & gratitude journal ----------
+
+async function practicesMenu({ phoneNumberId, from, store }, user) {
+  const body = "🌻 *Feel-good practices*\nSmall daily habits that make the heart lighter and life more beautiful. Which one calls to you today? 👇";
+  const rows = PRACTICES.map((p) => ({ title: p.title, description: p.description }));
+  if (!(await sendList(phoneNumberId, from, { body, button: "Choose", rows }))) {
+    await sendText(phoneNumberId, from, body + "\n\n" + PRACTICES.map((p) => p.title).join("\n"));
+  }
+  await remember(store, from, "Feel-good practices 🌻", body);
+}
+
+async function startGratitude({ phoneNumberId, from, store }, user) {
+  user.pendingGratitude = Date.now();
+  await saveUser(store, from, user);
+  const n = (user.gratitude || []).length;
+  const body = (n ? `📓 *Gratitude journal* · entry ${n + 1}\n\n` : "📓 *Gratitude journal*\nGratitude is the treasure of contentment, Kunda Nidhi: _santosham paramam sukham_, contentment is the greatest happiness.\n\n") +
+    "Write *3 good things* from today, big or tiny: a cup of chai, a kind word, a moment of sunlight 🌸\n\nJust type them here, I'll keep them safe for you.";
+  await deliver(phoneNumberId, from, { reply: body, image: n ? null : cardUrl("kunda"), options: [], menu: null });
+  await remember(store, from, "Gratitude journal 📓", body);
+}
+
+async function saveGratitude(ctx, user, text) {
+  delete user.pendingGratitude;
+  user.gratitude = [...(user.gratitude || []), { d: istDate(), t: text.slice(0, 500) }].slice(-60);
+  await saveUser(ctx.store, ctx.from, user);
+  const n = user.gratitude.length;
+  const note = `They just wrote gratitude journal entry number ${n}: "${text.slice(0, 300)}". ` +
+    "Celebrate it warmly and specifically (mention one thing they wrote and why it's beautiful). Teach in one line how writing gratitude daily trains the mind to notice good (contentment, Kunda Nidhi). " +
+    (n >= 3 ? `Celebrate their streak: ${n} entries so far. ` : "Invite them to make it a nightly habit, 3 things before sleep. ") +
+    "End with a warm question about one of the things they wrote. Under 90 words.";
+  await converse(ctx, user, text, { note, options: [BTN.feel, BTN.story, BTN.doorMeditate] });
 }
 
 // ---------- sacred places ----------
