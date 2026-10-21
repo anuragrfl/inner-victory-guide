@@ -19,6 +19,7 @@ import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
 import { MEDITATIONS, findMeditation } from "../../lib/meditate.mjs";
 import { PRACTICES, findPractice } from "../../lib/practices.mjs";
+import { COLLECTIONS, rowTitle, findExplore } from "../../lib/explore.mjs";
 import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
@@ -40,7 +41,7 @@ const MAIN_MENU = {
     { title: "My heart 💛", description: "Share how you feel, reflect, self-love" },
     { title: "Meditate 🧘", description: "1-2 minute guided pauses: breath, calm, sleep" },
     { title: "Grow ⚔️", description: "Kill Ravan's heads, 10-day journey, self-check" },
-    { title: "Learn 📚", description: "Stories, quizzes, Devis, temples and more" },
+    { title: "Learn 📚", description: "9 Devis, Ravan's 10 heads, Siddhis, temples" },
   ],
 };
 
@@ -217,6 +218,13 @@ export default async (req) => {
     case "selflove": await converse(ctx, user, text, { note: "They want a self-love moment. Warmly remind them of their worth (specific, not generic), share one line of wisdom (e.g. Gita 6.5: be your own friend), give one tiny self-love practice to do today, and end with a gentle personal question about how they treat themselves. Under 110 words. No options or menu.", card: "kushmanda", options: [] }); return ok();
     case "sacred": await sacredMenu(ctx, user); return ok();
     case "practices": await practicesMenu(ctx, user); return ok();
+    case "explore_devi": case "explore_nidhi": case "explore_siddhi": await exploreMenu(ctx, user, cmd.slice(8)); return ok();
+    case "explore_next": {
+      const kind = /nidhi/i.test(text) ? "nidhi" : /siddhi/i.test(text) ? "siddhi" : "devi";
+      const i = user.explore?.kind === kind ? user.explore.i + 1 : 0;
+      if (i >= COLLECTIONS[kind].items.length) { await exploreMenu(ctx, user, kind); return ok(); }
+      await exploreItem(ctx, user, kind, i, text); return ok();
+    }
     case "gratitude": await startGratitude(ctx, user); return ok();
     case "stuck": await converse(ctx, user, text, { note: "They are still stuck / restless / feel it isn't helping. Follow WHEN THEY'RE STILL STUCK exactly: honour their honesty warmly, normalise it with a Devi's example, never sound dismissive or wrap up. Under 100 words. End by offering the three doors.", options: [BTN.talk, BTN.story, BTN.devi] }); return ok();
     case "talk": await converse(ctx, user, text, { note: "They chose to talk it out. Ask ONE soft, specific question about what feels stuck right now (a person, a decision, a worry, a feeling in the body). Show you're fully here. 2-3 short lines. No options or menu, so they write in their own words.", options: [] }); return ok();
@@ -250,6 +258,12 @@ export default async (req) => {
   if (!cmd && user.pendingGratitude && Date.now() - user.pendingGratitude < 12 * 3600 * 1000) {
     await saveGratitude(ctx, user, text);
     return ok();
+  }
+
+  // A Devi, Nidhi or Siddhi chosen from its list.
+  if (!cmd) {
+    const ex = findExplore(text);
+    if (ex) { await exploreItem(ctx, user, ex.kind, ex.i, text); return ok(); }
   }
 
   // A feel-good practice chosen from the list.
@@ -471,6 +485,27 @@ async function saveGratitude(ctx, user, text) {
     (n >= 3 ? `Celebrate their streak: ${n} entries so far. ` : "Invite them to make it a nightly habit, 3 things before sleep. ") +
     "End with a warm question about one of the things they wrote. Under 90 words.";
   await converse(ctx, user, text, { note, options: [BTN.feel, BTN.story, BTN.doorMeditate] });
+}
+
+// ---------- explore: 9 Devis, 9 Nidhis, 8 Siddhis ----------
+
+async function exploreMenu({ phoneNumberId, from, store }, user, kind) {
+  const c = COLLECTIONS[kind];
+  const rows = c.items.map((it, i) => ({ title: rowTitle(c, it, i), description: it.q }));
+  if (!(await sendList(phoneNumberId, from, { body: c.body, button: "Choose", rows }))) {
+    await sendText(phoneNumberId, from, c.body + "\n\n" + rows.map((r) => r.title).join("\n"));
+  }
+  await remember(store, from, c.title, c.body);
+}
+
+async function exploreItem(ctx, user, kind, i, text) {
+  const c = COLLECTIONS[kind], it = c.items[i];
+  user.explore = { kind, i };
+  await saveUser(ctx.store, ctx.from, user);
+  const last = i === c.items.length - 1;
+  const others = { devi: "💎 The 9 Nidhis", nidhi: "✨ The 8 Siddhis", siddhi: "🌸 The 9 Devis" };
+  const options = last ? [others[kind], BTN.killMenu, BTN.quiz] : [c.next, c.all, BTN.feel];
+  await converse(ctx, user, text, { note: c.note(it, i) + " Do not add your own options; buttons are added for you.", card: it.slug, options });
 }
 
 // ---------- sacred places ----------
