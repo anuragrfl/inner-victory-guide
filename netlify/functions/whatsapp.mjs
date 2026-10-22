@@ -25,6 +25,7 @@ import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mj
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
+import { incident, resolved, queueUnanswered } from "../../lib/health.mjs";
 import { HI_HEAD_NAMES, WELCOME_EN, FALLBACKS } from "../../lib/hi.mjs";
 import { setLang, isHindi, trLabel, trBody, toEnglish, wantsLanguage, hasDevanagari } from "../../lib/i18n.mjs";
 import { HEADS, BTN, detectCommand, scoreAnswer, istDate, daysBetween, weekId, progressBar, topHeads, personContext } from "../../lib/flows.mjs";
@@ -73,7 +74,23 @@ const DOORS = {
   ] },
 };
 
+// Counts of WhatsApp sends in this request, to notice when nothing could be delivered.
+let SENT_OK = 0, SENT_FAIL = 0, LAST_FAIL = "", CURRENT = null;
+
 export default async (req) => {
+  SENT_OK = 0; SENT_FAIL = 0; LAST_FAIL = ""; CURRENT = null;
+  const res = await handle(req);
+  if (CURRENT && SENT_FAIL > 0 && SENT_OK === 0) {
+    // Nothing reached the person: remember the message so health.mjs can answer it later, and alert.
+    await queueUnanswered(CURRENT.from, CURRENT.text, CURRENT.pn);
+    await incident("whatsapp", LAST_FAIL);
+  } else if (CURRENT && SENT_OK > 0) {
+    resolved("whatsapp").catch(() => {});
+  }
+  return res;
+};
+
+async function handle(req) {
   if (req.method === "GET") return verifyWebhook(req);
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
@@ -134,6 +151,11 @@ export default async (req) => {
     return ok();
   }
   const text = toEnglish(rawText);
+  CURRENT = { from, text: rawText, pn: phoneNumberId };
+  if (String(msg.id).startsWith("retry-")) {
+    setLang((await loadUser(store, from)).lang);
+    await sendText(phoneNumberId, from, "🙏 Sorry for the delay, I couldn't reply earlier because of a small technical hiccup. Here's my answer to your message:");
+  }
   // Safety first: if someone may be in danger, share real help before anything else.
   if (isCrisis(text)) {
     user.care = Date.now();
@@ -310,7 +332,7 @@ export default async (req) => {
 
   await converse(ctx, user, text);
   return ok();
-};
+}
 
 export const config = { path: "/whatsapp" };
 
@@ -350,6 +372,7 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
     answer = await askClaude(messages, personContext(user));
   } catch (err) {
     console.error("Claude error:", err);
+    incident("claude", String(err?.message || err)).catch(() => {});
     // Never show an error: a ready, warm reply keeps the conversation going.
     const body = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
     const options = [BTN.doorMeditate, BTN.feel, BTN.story];
@@ -358,6 +381,7 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
     return;
   }
 
+  resolved("claude").catch(() => {});
   const parsed = parseReply(answer);
   if (opts.options) { parsed.options = opts.options; parsed.menu = null; }
   if (opts.card !== undefined) parsed.card = opts.card;
@@ -1169,10 +1193,17 @@ async function graphSend(phoneNumberId, payload, label) {
       headers: { "content-type": "application/json", authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
       body: JSON.stringify({ messaging_product: "whatsapp", ...payload }),
     });
-    if (!res.ok) { console.error(`WhatsApp ${label} send failed:`, res.status, await res.text()); return false; }
+    if (!res.ok) {
+      const t = await res.text();
+      console.error(`WhatsApp ${label} send failed:`, res.status, t);
+      if (label !== "read") { SENT_FAIL++; LAST_FAIL = `${res.status} ${t.slice(0, 200)}`; }
+      return false;
+    }
+    if (label !== "read") SENT_OK++;
     return true;
   } catch (e) {
     console.error(`WhatsApp ${label} send error:`, e);
+    if (label !== "read") { SENT_FAIL++; LAST_FAIL = String(e?.message || e); }
     return false;
   }
 }
