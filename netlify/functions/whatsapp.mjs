@@ -15,13 +15,14 @@
 
 import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
-import { SYSTEM_PROMPT, CARD_SLUGS } from "../../lib/knowledge.mjs";
+import { SYSTEM_PROMPT, TEMPLE_KNOWLEDGE, CARD_SLUGS } from "../../lib/knowledge.mjs";
 import { FEELINGS, findFeeling, DEEP_QUESTIONS, pickDeepQuestion, isCrisis, CRISIS_MESSAGE, moodLine } from "../../lib/heart.mjs";
 import { MEDITATIONS, findMeditation } from "../../lib/meditate.mjs";
 import { PRACTICES, findPractice } from "../../lib/practices.mjs";
 import { COLLECTIONS, rowTitle, findExplore } from "../../lib/explore.mjs";
 import { HOOKS, pickHook, hookAnswer } from "../../lib/hooks.mjs";
-import { TEMPLE_GROUPS, findTempleGroup, findTemple } from "../../lib/temples.mjs";
+import { TEMPLE_GROUPS, ALL_TEMPLES, findTempleGroup, findTemple } from "../../lib/temples.mjs";
+import { HI_TEMPLES } from "../../lib/hi.mjs";
 import { HEAD_CHALLENGES, MIND_TOOLKIT, CHALLENGE_LEN, findHead, slainBar } from "../../lib/challenges.mjs";
 import { QUIZ_LEN, QUIZ_TOPICS, topicFromText, pickQuestions, presentQuestion, matchOption, quizVerdict } from "../../lib/quiz.mjs";
 import { QUIZ_BANK } from "../../lib/quizbank.mjs";
@@ -369,7 +370,8 @@ async function converse({ phoneNumberId, from, store, profileName }, user, text,
 
   let answer;
   try {
-    answer = await askClaude(messages, personContext(user));
+    const recent = messages.slice(-4).filter((m) => m.role === "user").map((m) => String(m.content).replace(/\[GUIDE NOTE[\s\S]*$/, "")).join(" ") + " " + (opts.note || "");
+    answer = await askClaude(messages, personContext(user), TEMPLE_RE.test(recent));
   } catch (err) {
     console.error("Claude error:", err);
     incident("claude", String(err?.message || err)).catch(() => {});
@@ -1138,16 +1140,23 @@ function trimHistory(turns) {
 }
 
 // One retry for a busy server or an empty answer, so a person rarely sees "try again".
-async function askClaude(messages, person = "") {
-  try { return await askClaudeOnce(messages, person); }
+let LONG_CACHE = true;
+// Temple notes go to the guide only when temples are being discussed.
+const TEMPLE_RE = new RegExp(["temple", "mandir", "tirth", "teerth", "jyotirling", "shakti", "dham", "darshan", "pilgrim", "yatra",
+  "मंदिर", "तीर्थ", "ज्योतिर्लिंग", "शक्तिपीठ", "धाम", "दर्शन", "यात्रा",
+  ...ALL_TEMPLES.map((t) => t.name.split(" ")[0]), ...Object.values(HI_TEMPLES).map((t) => t.split(" ")[0])]
+  .filter((w) => w.length > 2 && !["The", "Ram", "Char", "Chota", "Tara", "राम", "चार", "छोटा", "तारा"].includes(w)).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "i");
+
+async function askClaude(messages, person = "", temples = false) {
+  try { return await askClaudeOnce(messages, person, temples); }
   catch (err) {
     console.error("Claude first try failed, retrying:", String(err).slice(0, 300));
     await new Promise((r) => setTimeout(r, 800));
-    return askClaudeOnce(messages, person);
+    return askClaudeOnce(messages, person, temples);
   }
 }
 
-async function askClaudeOnce(messages, person = "") {
+async function askClaudeOnce(messages, person = "", temples = false) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1160,13 +1169,20 @@ async function askClaudeOnce(messages, person = "") {
       max_tokens: 1500,
       thinking: { type: "disabled" }, // chat replies are short; thinking tokens count toward max_tokens and could leave no text
       system: [
-        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+        // Cached for an hour so most replies reuse the long instructions at a tenth of the price.
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ...(LONG_CACHE ? { ttl: "1h" } : {}) } },
+        ...(temples ? [{ type: "text", text: TEMPLE_KNOWLEDGE, cache_control: { type: "ephemeral", ...(LONG_CACHE ? { ttl: "1h" } : {}) } }] : []),
         ...(person ? [{ type: "text", text: `ABOUT THIS PERSON (private, from the app):\n${person}` }] : []),
         ...(isHindi() ? [{ type: "text", text: "LANGUAGE: This person has chosen Hindi. Write your whole reply in simple, warm, natural Hindi (Devanagari script), like a caring friend in India. Write [[options]] and [[menu]] choices in Hindi too (each at most 20 characters). Card tags stay as they are." }] : []),
       ],
       messages,
     }),
   });
+  if (!res.ok && res.status === 400 && LONG_CACHE) {
+    const t = await res.text();
+    if (/ttl|cache/i.test(t)) { LONG_CACHE = false; return askClaudeOnce(messages, person, temples); } // fall back to the 5-minute cache
+    throw new Error(`Claude API 400: ${t}`);
+  }
   if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
